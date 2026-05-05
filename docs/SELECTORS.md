@@ -48,6 +48,7 @@ Confirmado y mapeado contra la UI real (mayo 2026).
 7. Resultado: si la URL cambia a `/image-gen/genai-image/{uuid}`, se usa ese path; si no cambia, se resuelve leyendo el panel activo.
 8. Éxito: `img[alt="Generated Image"]` dentro de `[data-cy="details-panel"]` con src en `gen-assets*.envatousercontent.com`.
 9. Falla explícita: texto `All generations failed` o `Try again` en el panel activo (fail fast).
+10. Fallback final: si el panel no trae señal, detectar imágenes nuevas por diferencia global (`global_diff`) entre el estado antes y después de submit.
 
 ### Selectores
 

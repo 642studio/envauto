@@ -246,6 +246,7 @@ El archivo `.url.txt` te dice dónde quedó el browser al fallar. El `.html` te 
 2. Fallback a leer `[data-cy="details-panel"]` y resolver por estado visible:
    - Éxito: `img[alt="Generated Image"]` con `src` de `gen-assets*.envatousercontent.com`.
    - Error explícito: `All generations failed` o `Try again` (fail fast, sin esperar 300s).
+3. Si el panel del prompt no trae señal, usar fallback `global_diff`: detectar `img[alt="Generated Image"]` nuevas por diferencia contra el baseline previo al submit.
 
 Con esto el job deja de quedar colgado cuando Envato no navega.
 
