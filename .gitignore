@@ -1,0 +1,26 @@
+# Secrets y sesión
+.env
+auth/
+!auth/.gitkeep
+
+# Outputs
+storage/
+!storage/.gitkeep
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+
+# Sistema
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
