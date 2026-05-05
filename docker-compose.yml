@@ -1,0 +1,14 @@
+services:
+  envautomatico:
+    build: .
+    container_name: envautomatico
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    env_file:
+      - .env
+    volumes:
+      - ./storage:/app/storage
+      - ./auth:/app/auth
+    # Playwright/Chromium necesita más shared memory para evitar crashes.
+    shm_size: 1gb
