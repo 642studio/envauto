@@ -23,7 +23,7 @@ import re
 from typing import Any
 
 from loguru import logger
-from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
+from playwright.async_api import Error as PlaywrightError, Page, TimeoutError as PlaywrightTimeoutError
 
 from app.adapters.base import GenerationResult, GeneratorAdapter
 from app.config import settings
@@ -165,7 +165,17 @@ class ImageGenAdapter(GeneratorAdapter):
                 )
 
             await self.dismiss_cookiebot_if_present(page)
-            panel_state = await self._read_active_panel_state(page, prompt=prompt)
+            try:
+                panel_state = await self._read_active_panel_state(page, prompt=prompt)
+            except PlaywrightError as exc:
+                if self._is_transient_navigation_context_error(exc):
+                    logger.debug(
+                        "[image] contexto JS transitorio durante navegación, reintento en loop"
+                    )
+                    await asyncio.sleep(1)
+                    elapsed += 1
+                    continue
+                raise
             last_panel_state = panel_state
 
             # Si el panel del prompt no trae señal, usar el mejor panel con señal visible.
@@ -235,26 +245,31 @@ class ImageGenAdapter(GeneratorAdapter):
         )
 
     async def _list_visible_result_images(self, page: Page) -> list[str]:
-        return await page.evaluate(
-            """
-            ({ resultImageSelector }) => {
-              const visible = (el) => {
-                if (!el) return false;
-                const style = window.getComputedStyle(el);
-                if (style.visibility === "hidden" || style.display === "none") return false;
-                return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
-              };
+        try:
+            return await page.evaluate(
+                """
+                ({ resultImageSelector }) => {
+                  const visible = (el) => {
+                    if (!el) return false;
+                    const style = window.getComputedStyle(el);
+                    if (style.visibility === "hidden" || style.display === "none") return false;
+                    return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+                  };
 
-              return Array.from(document.querySelectorAll(resultImageSelector))
-                .filter(visible)
-                .map((img) => ({ src: img.src, top: img.getBoundingClientRect().top }))
-                .filter((x) => !!x.src)
-                .sort((a, b) => a.top - b.top)
-                .map((x) => x.src);
-            }
-            """,
-            {"resultImageSelector": self.RESULT_IMAGE},
-        )
+                  return Array.from(document.querySelectorAll(resultImageSelector))
+                    .filter(visible)
+                    .map((img) => ({ src: img.src, top: img.getBoundingClientRect().top }))
+                    .filter((x) => !!x.src)
+                    .sort((a, b) => a.top - b.top)
+                    .map((x) => x.src);
+                }
+                """,
+                {"resultImageSelector": self.RESULT_IMAGE},
+            )
+        except PlaywrightError as exc:
+            if self._is_transient_navigation_context_error(exc):
+                return []
+            raise
 
     async def _read_active_panel_state(self, page: Page, prompt: str) -> dict[str, Any]:
         return await page.evaluate(
@@ -366,6 +381,11 @@ class ImageGenAdapter(GeneratorAdapter):
                 "prompt": prompt,
             },
         )
+
+    @staticmethod
+    def _is_transient_navigation_context_error(exc: Exception) -> bool:
+        msg = str(exc).lower()
+        return "execution context was destroyed" in msg or "most likely because of a navigation" in msg
 
     async def download(self, page: Page, meta: dict[str, Any]) -> GenerationResult:
         """Descarga la primera imagen vía HTTP usando las cookies del contexto.
