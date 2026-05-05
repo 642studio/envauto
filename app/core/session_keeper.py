@@ -76,16 +76,19 @@ class SessionKeeper:
                 await self._ping()
                 last_ping = now
 
+    # URL protegida que redirige a sign_in si la sesión expiró.
+    PING_URL = "https://app.envato.com/image-gen"
+
     async def _ping(self) -> None:
-        """Navega al home de Envato AI y revisa si seguimos logueados."""
+        """Navega a app.envato.com/image-gen y revisa si seguimos logueados."""
         try:
             async with browser_manager.page() as page:
-                await page.goto(settings.envato_ai_home, wait_until="domcontentloaded")
+                await page.goto(self.PING_URL, wait_until="domcontentloaded")
                 if any(m in page.url for m in self.LOGIN_MARKERS):
                     self.mark_unauthenticated()
                 else:
                     self._authenticated = True
-                    logger.debug("Keepalive ok")
+                    logger.debug("Keepalive ok — URL: {}", page.url)
         except Exception as exc:  # noqa: BLE001
             logger.warning("Keepalive falló: {}", exc)
 
