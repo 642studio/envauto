@@ -40,7 +40,10 @@ class BrowserManager:
             headless=settings.headless,
             args=["--disable-blink-features=AutomationControlled"],
         )
+        await self._create_context()
 
+    async def _create_context(self) -> None:
+        """Crea el contexto del browser con el storage_state actual."""
         storage_state = (
             str(settings.storage_state_file)
             if settings.storage_state_file.exists()
@@ -67,6 +70,19 @@ class BrowserManager:
         )
         self._context.set_default_timeout(settings.nav_timeout_ms)
         self._context.set_default_navigation_timeout(settings.nav_timeout_ms)
+
+    async def reload_context(self) -> None:
+        """Recrea el contexto con el storage_state actualizado en disco.
+
+        Adquiere el lock para no interrumpir un job que esté corriendo.
+        Llamar después de escribir un nuevo storage_state.json.
+        """
+        async with self._lock:
+            if self._context:
+                await self._context.close()
+                self._context = None
+            await self._create_context()
+        logger.info("Contexto del browser recargado con storage_state actualizado")
 
     async def stop(self) -> None:
         """Cierra navegador y Playwright limpiamente."""

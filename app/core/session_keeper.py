@@ -54,8 +54,11 @@ class SessionKeeper:
             self._task = None
 
     async def _loop(self) -> None:
-        last_ping = 0.0
-        last_save = 0.0
+        # Validar la sesión al arrancar, antes de aceptar el primer job.
+        await self._ping()
+        now = asyncio.get_event_loop().time()
+        last_ping = now
+        last_save = now
         while True:
             await asyncio.sleep(60)
             now = asyncio.get_event_loop().time()

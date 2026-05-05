@@ -5,9 +5,11 @@
 ## Funciona
 
 - **Scaffolding completo** del proyecto: FastAPI, BrowserManager con contexto persistente, JobQueue, SessionKeeper, base adapter, login interactivo CLI, Dockerfile, docker-compose.
-- **Deploy a VPS Linux** con Docker. Probado en `192.168.1.160` con usuario sin sudo automático en `/opt/`.
-- **Sesión persistente de Envato**. El login se hace una vez en local con `scripts/login.py`, se sube el `storage_state.json` al VPS, y el contenedor levanta un Chromium que reutiliza la sesión para todas las peticiones. `/health` reporta `authenticated: true` correctamente.
-- **API REST**: `/health`, `POST /generate/{tipo}`, `GET /jobs/{id}`, `POST /admin/storage-state`, `/files/...`. Todo con bearer token salvo `/health` y `/files/...`.
+- **Deploy a VPS Linux** con Docker. Probado en `100.99.244.54` con Docker compose.
+- **Sesión persistente de Envato**. El login se hace una vez en local con `scripts/login.py`, se sube el `storage_state.json` al VPS, y el contenedor levanta un Chromium que reutiliza la sesión para todas las peticiones.
+- **Hot-reload de sesión**: `POST /admin/storage-state` recrea el contexto del browser en caliente sin reiniciar el contenedor. `POST /admin/reload-session` recarga solo el contexto cuando el archivo ya está en disco.
+- **Validación de sesión al inicio**: el SessionKeeper hace un ping a Envato en el primer ciclo del loop para detectar sesión expirada antes de aceptar jobs.
+- **API REST**: `/health`, `POST /generate/{tipo}`, `GET /jobs/{id}`, `POST /admin/storage-state`, `POST /admin/reload-session`, `/files/...`. Todo con bearer token salvo `/health` y `/files/...`.
 - **Job queue serial** con un solo worker. Encola, ejecuta y reporta status pasando por `queued -> running -> completed | failed`.
 - **Debug automático en fallos**: cada job que falla guarda screenshot + HTML + URL en `storage/debug/`, accesibles desde el navegador en `/files/debug/`.
 - **Selectores de imageGen mapeados** contra UI real:
@@ -16,28 +18,38 @@
   - URL pattern del job: `/image-gen/genai-image/{uuid}`.
   - Imágenes resultado: `img[alt="Generated Image"]` con src en `gen-assets-resized.envatousercontent.com`.
 
-## En debug ahora mismo
+## Estado actual (2026-05-05)
 
-**Síntoma**: el adapter de imageGen llega a clickear "Generate" pero la generación termina con error porque Envato muestra "All generations failed" en el historial.
+**Síntoma**: `POST /generate/image` termina con `failed` y error `"La sesión de Envato no es válida"`. El adapter detecta que la página redirigió a `sign_in` al navegar a `app.envato.com/image-gen`.
 
-**Hipótesis**: dos posibles causas y hay que distinguir entre ellas:
+**Causa**: las cookies en `auth/storage_state.json` del VPS expiraron. El contenedor las cargó al arrancar y las sigue usando aunque ya no sean válidas.
 
-1. **Envato backend está fallando para todas las generaciones** (incluso manuales). Si esto es así, no es problema nuestro y se resuelve solo cuando Envato vuelve. Validable abriendo `app.envato.com/image-gen` manualmente y probando.
+**Solución inmediata** (refresh de sesión):
+```bash
+# En tu Mac local:
+python scripts/login.py
+# → guarda auth/storage_state.json con cookies frescas
 
-2. **Envato detecta automatización y bloquea silenciosamente** la generación pero deja la sesión válida. Validable comparando: si el mismo prompt funciona desde el browser manual y falla desde el adapter, es esto.
+# Subir sin SCP (hot-reload, no requiere reiniciar):
+curl -X POST "http://100.99.244.54:8000/admin/storage-state" \
+  -H "Authorization: Bearer $ENVAUTO_TOKEN" \
+  -F "file=@auth/storage_state.json"
 
-**Próximo paso**: validar la hipótesis con un test manual. Si es la #2, mitigaciones por orden de simplicidad:
-- Agregar `playwright-stealth` para parchear fingerprints comunes.
-- Aumentar delays naturales entre acciones (typing speed, pausas entre clicks).
-- Correr Chromium en modo headed con `Xvfb` en lugar de headless.
+# Verificar:
+curl "http://100.99.244.54:8000/health"
+# → debe mostrar "authenticated": true
+```
+
+**Hipótesis adicional (IndexedDB)**: si las cookies son válidas pero Envato redirige igual, el problema puede ser que la SPA guarda tokens de auth en IndexedDB, que Playwright no captura en `storage_state`. En ese caso, explorar inyección de IndexedDB vía `page.evaluate()` después del `new_context`.
 
 ## Roadmap
 
-### Inmediato (al volver Envato o resolver detección)
+### Inmediato
 
-1. Validar imageGen end-to-end con un job que termine `completed` y devuelva un asset descargable.
-2. Confirmar que el `result.asset_url` abre la imagen real en el navegador.
-3. Confirmar que el SessionKeeper guarda `storage_state` actualizado.
+1. Refrescar sesión en el VPS con el flujo de hot-reload (ver arriba).
+2. Validar imageGen end-to-end con un job que termine `completed` y devuelva un asset descargable.
+3. Confirmar que el `result.asset_url` abre la imagen real en el navegador.
+4. Si sigue fallando con cookies frescas → investigar IndexedDB como causa raíz.
 
 ### Próximos generadores
 
