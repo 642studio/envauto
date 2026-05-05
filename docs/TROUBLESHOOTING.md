@@ -213,6 +213,22 @@ scp auth/storage_state.json coreprorex@vps:/opt/envautomatico/auth/
 ssh coreprorex@vps "cd /opt/envautomatico && docker compose restart"
 ```
 
+### El job falla con `RuntimeError: La sesión de Envato no es válida` aunque `/health` diga true
+
+**Causa**: el `storage_state.json` cargó cookies parciales o quedó sin datos de sesión de `app.envato.com` al guardarse. Eso produce redirect inmediato a `https://account.envato.com/sign_in?to=envatoapp` cuando el adapter navega.
+
+**Solución**: regenerar sesión con el código actualizado (guarda `IndexedDB` y usa el mismo fingerprint base que el VPS), copiarla y reiniciar.
+
+```bash
+cd /Users/642studio/Documents/Claude/Projects/envautomatico
+git pull
+./.venv/bin/python3 scripts/login.py
+scp auth/storage_state.json coreprorex@100.99.244.54:/opt/envautomatico/auth/storage_state.json
+ssh coreprorex@100.99.244.54 "cd /opt/envautomatico && docker compose restart"
+```
+
+Durante `scripts/login.py` no cierres Chromium antes del `[ok]` y verificá que `https://app.envato.com/image-gen` carga en la misma ventana sin pedir login.
+
 ### El job termina con `TimeoutError: Locator.wait_for: Timeout 60000ms`
 
 **Causa**: el adapter no encontró un selector esperado dentro del timeout. Las causas habituales son:

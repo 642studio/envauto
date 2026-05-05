@@ -53,7 +53,17 @@ async def main() -> None:
             if settings.storage_state_file.exists()
             else None
         )
-        context = await browser.new_context(storage_state=storage)
+        # Debe matchear el contexto del VPS para evitar invalidaciones por fingerprint.
+        context = await browser.new_context(
+            storage_state=storage,
+            viewport={
+                "width": settings.browser_viewport_width,
+                "height": settings.browser_viewport_height,
+            },
+            user_agent=settings.browser_user_agent,
+            locale=settings.browser_locale,
+            timezone_id=settings.browser_timezone_id,
+        )
         page = await context.new_page()
         await page.goto(settings.envato_login_url)
 
@@ -81,7 +91,14 @@ async def main() -> None:
             await browser.close()
             raise SystemExit(1)
 
-        await context.storage_state(path=str(settings.storage_state_file))
+        try:
+            await context.storage_state(
+                path=str(settings.storage_state_file),
+                indexed_db=True,
+            )
+        except TypeError:
+            await context.storage_state(path=str(settings.storage_state_file))
+            print("[warn] Tu versión de Playwright no soporta indexed_db en storage_state.")
         print(f"\n[ok] Sesión guardada en {settings.storage_state_file}")
         print(
             "Ahora subí ese archivo al VPS:\n"

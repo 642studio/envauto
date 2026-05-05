@@ -34,6 +34,15 @@ class Settings(BaseSettings):
     browser_channel: str = "chromium"
     nav_timeout_ms: int = 60_000
     generation_timeout_ms: int = 300_000
+    browser_user_agent: str = (
+        "Mozilla/5.0 (X11; Linux x86_64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/130.0.0.0 Safari/537.36"
+    )
+    browser_locale: str = "en-US"
+    browser_timezone_id: str = "America/New_York"
+    browser_viewport_width: int = 1440
+    browser_viewport_height: int = 900
 
     # Envato
     envato_login_url: str = "https://account.envato.com/sign_in"

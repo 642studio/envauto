@@ -54,16 +54,14 @@ class BrowserManager:
 
         self._context = await self._browser.new_context(
             storage_state=storage_state,
-            viewport={"width": 1440, "height": 900},
-            # User-Agent consistente con el OS del contenedor (Ubuntu/Linux).
-            # Mentir el OS es la heurística #1 que usa el anti-bot.
-            user_agent=(
-                "Mozilla/5.0 (X11; Linux x86_64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/130.0.0.0 Safari/537.36"
-            ),
-            locale="en-US",
-            timezone_id="America/New_York",
+            viewport={
+                "width": settings.browser_viewport_width,
+                "height": settings.browser_viewport_height,
+            },
+            # Mantener el mismo fingerprint base entre login local y VPS.
+            user_agent=settings.browser_user_agent,
+            locale=settings.browser_locale,
+            timezone_id=settings.browser_timezone_id,
         )
         self._context.set_default_timeout(settings.nav_timeout_ms)
         self._context.set_default_navigation_timeout(settings.nav_timeout_ms)
@@ -98,10 +96,23 @@ class BrowserManager:
                 await page.close()
 
     async def save_storage_state(self) -> None:
-        """Guarda el estado actual a auth/storage_state.json (cookies + localStorage)."""
+        """Guarda el estado actual a auth/storage_state.json.
+
+        Incluye IndexedDB cuando la versión de Playwright lo soporta para
+        preservar sesiones que guardan credenciales fuera de cookies/localStorage.
+        """
         if self._context is None:
             return
-        await self._context.storage_state(path=str(settings.storage_state_file))
+        try:
+            await self._context.storage_state(
+                path=str(settings.storage_state_file),
+                indexed_db=True,
+            )
+        except TypeError:
+            await self._context.storage_state(path=str(settings.storage_state_file))
+            logger.warning(
+                "Playwright sin soporte indexed_db en storage_state; guardando sin IndexedDB"
+            )
         logger.info("storage_state guardado en {}", settings.storage_state_file)
 
     @property
