@@ -181,18 +181,22 @@ Cuando `/health` te devuelve `authenticated: false`, la sesión murió. Regenera
 source .venv/bin/activate
 python scripts/login.py
 
-# subir el JSON nuevo (dos opciones)
-
-# Opción A: por SCP
-scp auth/storage_state.json coreprorex@192.168.1.160:/opt/envautomatico/auth/
-
-# Opción B: por API
-curl -X POST http://192.168.1.160:8000/admin/storage-state \
+# subir y recargar en caliente — NO hace falta reiniciar el contenedor
+curl -X POST http://100.99.244.54:8000/admin/storage-state \
   -H "Authorization: Bearer $ENVAUTO_TOKEN" \
   -F "file=@auth/storage_state.json"
 
-# reiniciar el contenedor para que tome la sesión nueva
-ssh coreprorex@192.168.1.160 "cd /opt/envautomatico && docker compose restart"
+# verificar
+curl http://100.99.244.54:8000/health
+# → "authenticated": true
+```
+
+Si preferís subir por SCP (ej: más rápido para archivos grandes), después recargá con:
+
+```bash
+scp auth/storage_state.json coreprorex@100.99.244.54:/opt/envautomatico/auth/
+curl -X POST http://100.99.244.54:8000/admin/reload-session \
+  -H "Authorization: Bearer $ENVAUTO_TOKEN"
 ```
 
 ### Ver logs
