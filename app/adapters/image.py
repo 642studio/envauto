@@ -6,11 +6,14 @@ Mapeo del flujo confirmado contra la UI real (mayo 2026):
 2. Escribir el prompt en el contenteditable [data-cy="prompt-input"].
 3. (Opcional) Configurar aspect ratio, count y style clickeando los comboboxes
    por su texto actual ("Square", "3 Variations", "Style") y eligiendo el item.
-4. Click en button[type="submit"] (texto "Generate").
-5. La URL cambia a /image-gen/genai-image/{uuid} cuando arrancan las generaciones.
-6. Las imágenes finales aparecen como img[alt="Generated Image"] con src en
-   gen-assets-resized.envatousercontent.com.
-7. La descarga se hace por HTTP directo al src usando las cookies del contexto,
+4. Si aparece Cookiebot, cerrarlo antes de clickear submit.
+5. Click en button[type="submit"] (texto "Generate").
+6. Resultado por estrategia dual:
+   - si la URL cambia a /image-gen/genai-image/{uuid}, se toma ese job_id;
+   - si no cambia, se resuelve por estado visible de [data-cy="details-panel"].
+7. Las imágenes finales aparecen como img[alt="Generated Image"] con src en
+   gen-assets*.envatousercontent.com.
+8. La descarga se hace por HTTP directo al src usando las cookies del contexto,
    en vez de pelear con un menú nativo del browser.
 """
 from __future__ import annotations
