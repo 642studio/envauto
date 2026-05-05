@@ -43,6 +43,8 @@ class ImageGenAdapter(GeneratorAdapter):
     RESULT_IMAGE = 'img[alt="Generated Image"]'
     DETAILS_PANEL = '[data-cy="details-panel"]'
     FAST_FAILURE_MARKERS = ("All generations failed", "Try again")
+    _last_prompt: str | None = None
+    _baseline_image_srcs: set[str] = set()
 
     # Comboboxes detectados por su texto actual. Se localizan dinámicamente
     # porque el texto cambia con la selección del usuario.
@@ -75,6 +77,7 @@ class ImageGenAdapter(GeneratorAdapter):
 
     async def submit(self, page: Page, payload: dict[str, Any]) -> None:
         prompt: str = payload["prompt"]
+        self._last_prompt = prompt
         logger.info("[image] enviando prompt ({} chars)", len(prompt))
 
         # El prompt es un div contenteditable. fill() funciona en Playwright
@@ -97,6 +100,9 @@ class ImageGenAdapter(GeneratorAdapter):
             # El botón "Style" abre un picker; el item se elige por texto exacto.
             await self._open_combobox_by_label(page, "Style")
             await page.get_by_role("option", name=style, exact=False).first.click()
+
+        # Baseline de imágenes visibles antes de generar, para detectar nuevas.
+        self._baseline_image_srcs = set(await self._list_visible_result_images(page))
 
         # Si Cookiebot reapareció entre acciones, cerrarlo antes del submit.
         await self.dismiss_cookiebot_if_present(page)
@@ -127,6 +133,7 @@ class ImageGenAdapter(GeneratorAdapter):
 
     async def wait_for_result(self, page: Page) -> dict[str, Any]:
         logger.info("[image] esperando resultado")
+        prompt = self._last_prompt or ""
 
         # Paso 1 (rápido): intentar detectar transición de URL al job.
         job_id: str | None = None
@@ -150,6 +157,7 @@ class ImageGenAdapter(GeneratorAdapter):
         elapsed = 0.0
         srcs: list[str] = []
         last_panel_state: dict[str, Any] = {}
+        clicked_prompt_panel = False
         while elapsed < deadline:
             if "sign_in" in page.url or "/login" in page.url:
                 raise RuntimeError(
@@ -157,18 +165,28 @@ class ImageGenAdapter(GeneratorAdapter):
                 )
 
             await self.dismiss_cookiebot_if_present(page)
-            panel_state = await self._read_active_panel_state(page)
+            panel_state = await self._read_active_panel_state(page, prompt=prompt)
             last_panel_state = panel_state
 
-            if panel_state["job_id"] and not job_id:
-                job_id = panel_state["job_id"]
+            # Si el panel del prompt no trae señal, usar el mejor panel con señal visible.
+            using_fallback_signal = (
+                panel_state["prompt_match"]
+                and not panel_state["has_failure"]
+                and not panel_state["image_srcs"]
+                and not panel_state["job_id"]
+                and panel_state["has_any_signal_panel"]
+            )
+            active_state = panel_state["signal_panel"] if using_fallback_signal else panel_state
 
-            if panel_state["has_failure"]:
+            if active_state["job_id"] and not job_id:
+                job_id = active_state["job_id"]
+
+            if active_state["has_failure"]:
                 raise RuntimeError(
-                    f"[image] Envato reportó error explícito: {panel_state['failure_marker']}"
+                    f"[image] Envato reportó error explícito: {active_state['failure_marker']}"
                 )
 
-            srcs = panel_state["image_srcs"]
+            srcs = active_state["image_srcs"]
             ready = [s for s in srcs if self.FINAL_SRC_PATTERN.search(s)]
             if ready:
                 return {
@@ -177,6 +195,37 @@ class ImageGenAdapter(GeneratorAdapter):
                     "page_url": page.url,
                     "resolution_path": resolution_path,
                 }
+
+            # Fallback: imágenes nuevas detectadas globalmente vs baseline previo al submit.
+            global_new = [
+                s for s in panel_state["global_image_srcs"]
+                if s not in self._baseline_image_srcs
+            ]
+            global_ready = [s for s in global_new if self.FINAL_SRC_PATTERN.search(s)]
+            if global_ready:
+                return {
+                    "envato_job_id": job_id,
+                    "image_srcs": global_ready,
+                    "page_url": page.url,
+                    "resolution_path": "global_diff",
+                }
+
+            # Intento adicional: seleccionar el panel del prompt para disparar su detalle.
+            if (
+                prompt
+                and panel_state["prompt_match"]
+                and not panel_state["has_failure"]
+                and not panel_state["image_srcs"]
+                and not panel_state["job_id"]
+                and not clicked_prompt_panel
+                and elapsed >= 10
+            ):
+                try:
+                    await page.locator(self.DETAILS_PANEL).filter(has_text=prompt).first.click(timeout=2_000)
+                    clicked_prompt_panel = True
+                except Exception:
+                    clicked_prompt_panel = True
+
             await asyncio.sleep(2)
             elapsed += 2
 
@@ -185,10 +234,10 @@ class ImageGenAdapter(GeneratorAdapter):
             f"srcs vistos: {srcs[:3]} | panel: {last_panel_state}"
         )
 
-    async def _read_active_panel_state(self, page: Page) -> dict[str, Any]:
+    async def _list_visible_result_images(self, page: Page) -> list[str]:
         return await page.evaluate(
             """
-            ({ detailsPanelSelector, resultImageSelector, failureMarkers }) => {
+            ({ resultImageSelector }) => {
               const visible = (el) => {
                 if (!el) return false;
                 const style = window.getComputedStyle(el);
@@ -196,34 +245,117 @@ class ImageGenAdapter(GeneratorAdapter):
                 return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
               };
 
-              const panels = Array.from(document.querySelectorAll(detailsPanelSelector));
-              const panel = panels.find(visible) || null;
-              if (!panel) {
+              return Array.from(document.querySelectorAll(resultImageSelector))
+                .filter(visible)
+                .map((img) => ({ src: img.src, top: img.getBoundingClientRect().top }))
+                .filter((x) => !!x.src)
+                .sort((a, b) => a.top - b.top)
+                .map((x) => x.src);
+            }
+            """,
+            {"resultImageSelector": self.RESULT_IMAGE},
+        )
+
+    async def _read_active_panel_state(self, page: Page, prompt: str) -> dict[str, Any]:
+        return await page.evaluate(
+            """
+            ({ detailsPanelSelector, resultImageSelector, failureMarkers, prompt }) => {
+              const visible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (style.visibility === "hidden" || style.display === "none") return false;
+                return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+              };
+
+              const panels = Array.from(document.querySelectorAll(detailsPanelSelector)).filter(visible);
+              if (!panels.length) {
                 return {
                   has_panel: false,
                   has_failure: false,
                   failure_marker: null,
                   job_id: null,
                   image_srcs: [],
+                  panel_count: 0,
+                  prompt_match: false,
+                  has_any_signal_panel: false,
+                  global_image_srcs: [],
+                  signal_panel: {
+                    has_failure: false,
+                    failure_marker: null,
+                    job_id: null,
+                    image_srcs: [],
+                  },
                 };
               }
 
-              const text = panel.innerText || "";
-              const failureMarker = failureMarkers.find((m) => text.includes(m)) || null;
-              const imageSrcs = Array.from(panel.querySelectorAll(resultImageSelector))
-                .map((img) => img.src)
-                .filter(Boolean);
-              const jobHref = Array.from(panel.querySelectorAll('a[href*="/image-gen/genai-image/"]'))
-                .map((a) => a.getAttribute("href"))
-                .find(Boolean) || "";
-              const match = jobHref.match(/\\/image-gen\\/genai-image\\/([0-9a-f-]+)/);
+              const states = panels.map((panel) => {
+                const text = panel.innerText || "";
+                const failureMarker = failureMarkers.find((m) => text.includes(m)) || null;
+                const imageSrcs = Array.from(panel.querySelectorAll(resultImageSelector))
+                  .map((img) => img.src)
+                  .filter(Boolean);
+                const jobHref = Array.from(panel.querySelectorAll('a[href*="/image-gen/genai-image/"]'))
+                  .map((a) => a.getAttribute("href"))
+                  .find(Boolean) || "";
+                const match = jobHref.match(/\\/image-gen\\/genai-image\\/([0-9a-f-]+)/);
+                const rect = panel.getBoundingClientRect();
+
+                return {
+                  text,
+                  failureMarker,
+                  imageSrcs,
+                  jobId: match ? match[1] : null,
+                  promptMatch: !!(prompt && text.includes(prompt)),
+                  top: rect.top,
+                  area: rect.width * rect.height,
+                };
+              });
+
+              states.sort((a, b) => {
+                if (a.promptMatch !== b.promptMatch) return a.promptMatch ? -1 : 1;
+                if (a.imageSrcs.length !== b.imageSrcs.length) return b.imageSrcs.length - a.imageSrcs.length;
+                if (a.area !== b.area) return b.area - a.area;
+                return a.top - b.top;
+              });
+
+              const chosen = states[0];
+              const signalPanels = states.filter((s) => s.failureMarker || s.imageSrcs.length || s.jobId);
+              signalPanels.sort((a, b) => {
+                if (!!a.failureMarker !== !!b.failureMarker) return a.failureMarker ? -1 : 1;
+                if (a.imageSrcs.length !== b.imageSrcs.length) return b.imageSrcs.length - a.imageSrcs.length;
+                if (a.area !== b.area) return b.area - a.area;
+                return a.top - b.top;
+              });
+              const bestSignal = signalPanels[0] || null;
+
+              const globalImageSrcs = Array.from(document.querySelectorAll(resultImageSelector))
+                .filter(visible)
+                .map((img) => ({ src: img.src, top: img.getBoundingClientRect().top }))
+                .filter((x) => !!x.src)
+                .sort((a, b) => a.top - b.top)
+                .map((x) => x.src);
 
               return {
                 has_panel: true,
-                has_failure: !!failureMarker,
-                failure_marker: failureMarker,
-                job_id: match ? match[1] : null,
-                image_srcs: imageSrcs,
+                has_failure: !!chosen.failureMarker,
+                failure_marker: chosen.failureMarker,
+                job_id: chosen.jobId,
+                image_srcs: chosen.imageSrcs,
+                panel_count: states.length,
+                prompt_match: chosen.promptMatch,
+                has_any_signal_panel: !!bestSignal,
+                global_image_srcs: globalImageSrcs,
+                signal_panel: bestSignal ? {
+                  has_failure: !!bestSignal.failureMarker,
+                  failure_marker: bestSignal.failureMarker,
+                  job_id: bestSignal.jobId,
+                  image_srcs: bestSignal.imageSrcs,
+                } : {
+                  has_failure: false,
+                  failure_marker: null,
+                  job_id: null,
+                  image_srcs: [],
+                },
               };
             }
             """,
@@ -231,6 +363,7 @@ class ImageGenAdapter(GeneratorAdapter):
                 "detailsPanelSelector": self.DETAILS_PANEL,
                 "resultImageSelector": self.RESULT_IMAGE,
                 "failureMarkers": list(self.FAST_FAILURE_MARKERS),
+                "prompt": prompt,
             },
         )
 
