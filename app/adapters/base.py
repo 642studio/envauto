@@ -20,9 +20,17 @@ from app.config import settings
 class GenerationResult:
     """Lo que devuelve un adapter al terminar."""
 
-    asset_url: str               # URL pública servida por nuestra API
-    asset_local_path: str        # Path absoluto en disco
-    metadata: dict[str, Any]     # Lo que sea relevante (prompt, opciones, IDs internos)
+    asset_urls: list[str]           # URLs públicas (una por variación generada)
+    asset_local_paths: list[str]    # Paths en disco correspondientes
+    metadata: dict[str, Any]
+
+    @property
+    def asset_url(self) -> str:
+        return self.asset_urls[0] if self.asset_urls else ""
+
+    @property
+    def asset_local_path(self) -> str:
+        return self.asset_local_paths[0] if self.asset_local_paths else ""
 
 
 class GeneratorAdapter(ABC):

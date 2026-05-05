@@ -43,7 +43,9 @@ async def run_job(job: Job) -> dict[str, Any]:
             raise
     return {
         "asset_url": result.asset_url,
+        "asset_urls": result.asset_urls,
         "asset_local_path": result.asset_local_path,
+        "asset_local_paths": result.asset_local_paths,
         "metadata": result.metadata,
     }
 

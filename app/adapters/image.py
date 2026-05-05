@@ -4,14 +4,12 @@ Mapeo del flujo confirmado contra la UI real (mayo 2026):
 
 1. Navegar a /image-gen.
 2. Escribir el prompt en el contenteditable [data-cy="prompt-input"].
-3. (Opcional) Configurar aspect ratio, count y style clickeando los comboboxes
-   por su texto actual ("Square", "3 Variations", "Style") y eligiendo el item.
+3. (Opcional) Configurar aspect ratio, count y style clickeando los comboboxes.
 4. Click en button[type="submit"] (texto "Generate").
-5. La URL cambia a /image-gen/genai-image/{uuid} cuando arrancan las generaciones.
+5. La URL cambia brevemente a /image-gen/genai-image/{uuid} y vuelve a /image-gen.
 6. Las imágenes finales aparecen como img[alt="Generated Image"] con src en
    gen-assets-resized.envatousercontent.com.
-7. La descarga se hace por HTTP directo al src usando las cookies del contexto,
-   en vez de pelear con un menú nativo del browser.
+7. La descarga se hace por HTTP directo al src usando las cookies del contexto.
 """
 from __future__ import annotations
 
@@ -32,30 +30,38 @@ class ImageGenAdapter(GeneratorAdapter):
 
     URL = "https://app.envato.com/image-gen"
 
-    # Selectores estables (data-cy + tipos semánticos).
-    # SUBMIT_BUTTON: hay versión desktop y mobile renderizadas en paralelo.
-    # Filtramos por visible y tomamos el primero para no romper en strict mode.
     PROMPT_INPUT = '[data-cy="prompt-input"]'
     SUBMIT_BUTTON = 'button[type="submit"][data-analytics-name="gen_click"]:visible'
     RESULT_IMAGE = 'img[alt="Generated Image"]'
 
-    # Comboboxes detectados por su texto actual. Se localizan dinámicamente
-    # porque el texto cambia con la selección del usuario.
-    ASPECT_RATIO_VALUES = {
-        "1:1": "Square",
-        "16:9": "Landscape",
-        "9:16": "Portrait",
-        "4:3": "Standard",
-        "3:4": "Tall",
+    # Etiquetas en inglés y español para los comboboxes.
+    # Cada ratio/cantidad mapea a una tupla de posibles textos según el idioma de la UI.
+    ASPECT_RATIO_VALUES: dict[str, tuple[str, ...]] = {
+        "1:1":  ("Square", "Cuadrado"),
+        "16:9": ("Landscape", "Panorámico", "Horizontal"),
+        "9:16": ("Portrait", "Retrato", "Vertical"),
+        "4:3":  ("Standard", "Estándar"),
+        "3:4":  ("Tall", "Alto"),
     }
 
-    VARIATIONS_VALUES = {1: "1 Variation", 2: "2 Variations", 3: "3 Variations", 4: "4 Variations"}
+    VARIATIONS_VALUES: dict[int, tuple[str, ...]] = {
+        1: ("1 Variation",  "1 Variación"),
+        2: ("2 Variations", "2 Variaciones"),
+        3: ("3 Variations", "3 Variaciones"),
+        4: ("4 Variations", "4 Variaciones"),
+    }
 
-    # Patrón de URL del job una vez que se dispara la generación.
     JOB_URL_PATTERN = re.compile(r"/image-gen/genai-image/([0-9a-f-]+)")
+    FINAL_SRC_PATTERN = re.compile(
+        r"gen-assets-resized\.envatousercontent\.com|gen-assets\.envatousercontent\.com"
+    )
 
-    # Patrón del src de la imagen final.
-    FINAL_SRC_PATTERN = re.compile(r"gen-assets-resized\.envatousercontent\.com|gen-assets\.envatousercontent\.com")
+    # Cuántos ciclos de 2 s sin cambio de cantidad se esperan antes de asumir
+    # que ya cargaron todas las variaciones.
+    _STABLE_CYCLES_REQUIRED = 3  # 6 segundos
+
+    def __init__(self) -> None:
+        self._expected_count: int = 1
 
     async def navigate(self, page: Page) -> None:
         logger.info("[image] navegando a {}", self.URL)
@@ -64,62 +70,97 @@ class ImageGenAdapter(GeneratorAdapter):
             raise RuntimeError(
                 "La sesión de Envato no es válida. Re-correr scripts/login.py."
             )
-        # Esperar a que el formulario esté listo.
         await page.locator(self.PROMPT_INPUT).first.wait_for(state="visible")
 
     async def submit(self, page: Page, payload: dict[str, Any]) -> None:
         prompt: str = payload["prompt"]
         logger.info("[image] enviando prompt ({} chars)", len(prompt))
 
-        # El prompt es un div contenteditable. fill() funciona en Playwright
-        # sobre contenteditable también.
         prompt_box = page.locator(self.PROMPT_INPUT).first
         await prompt_box.click()
         await prompt_box.fill(prompt)
 
-        # Opciones soportadas (todas opcionales).
         aspect_ratio = payload.get("aspect_ratio")
         if aspect_ratio in self.ASPECT_RATIO_VALUES:
-            await self._set_combobox(page, self.ASPECT_RATIO_VALUES[aspect_ratio])
+            await self._change_combobox(
+                page,
+                candidates=self._all_aspect_ratio_labels(),
+                target_labels=self.ASPECT_RATIO_VALUES[aspect_ratio],
+            )
 
         variations = payload.get("variations")
         if isinstance(variations, int) and variations in self.VARIATIONS_VALUES:
-            await self._set_combobox(page, self.VARIATIONS_VALUES[variations])
+            await self._change_combobox(
+                page,
+                candidates=self._all_variations_labels(),
+                target_labels=self.VARIATIONS_VALUES[variations],
+            )
+            self._expected_count = variations
+        else:
+            self._expected_count = 1
 
         style = payload.get("style")
         if style:
-            # El botón "Style" abre un picker; el item se elige por texto exacto.
-            await self._open_combobox_by_label(page, "Style")
-            await page.get_by_role("option", name=style, exact=False).first.click()
+            await self._change_combobox(
+                page,
+                candidates=["Style", "Estilo"],
+                target_labels=(style,),
+                exact_option=False,
+            )
 
-        # Disparar. .first como red de seguridad si :visible matchea más de uno.
         await page.locator(self.SUBMIT_BUTTON).first.click()
 
-    async def _set_combobox(self, page: Page, current_or_target_label: str) -> None:
-        """Click en un combobox cuyo texto visible es `current_or_target_label`,
-        después click en la opción del mismo nombre.
+    def _all_aspect_ratio_labels(self) -> list[str]:
+        return [label for labels in self.ASPECT_RATIO_VALUES.values() for label in labels]
 
-        Como el texto del botón refleja la selección actual, la primera vez
-        clickeamos sobre el valor por defecto, y la segunda vez sobre el deseado.
-        Si el valor ya estaba seleccionado no hace falta cambiarlo, así que
-        usamos el patrón abrir-y-elegir-target.
+    def _all_variations_labels(self) -> list[str]:
+        return [label for labels in self.VARIATIONS_VALUES.values() for label in labels]
+
+    async def _change_combobox(
+        self,
+        page: Page,
+        candidates: list[str],
+        target_labels: tuple[str, ...],
+        exact_option: bool = True,
+    ) -> None:
+        """Abre un combobox probando cada label candidato (idioma-agnóstico),
+        luego selecciona la opción objetivo.
+
+        `candidates` son los posibles textos del botón en el estado actual
+        (para abrirlo). `target_labels` son los posibles textos de la opción
+        a seleccionar (en distintos idiomas).
         """
-        await page.get_by_role("button", name=current_or_target_label).first.click()
-        # Esperar al menú emergente y seleccionar.
-        try:
-            await page.get_by_role("option", name=current_or_target_label).first.click(
-                timeout=5_000
-            )
-        except Exception:  # noqa: BLE001 - ya estaba seleccionado o el label difiere
-            await page.keyboard.press("Escape")
+        opened = False
+        for label in candidates:
+            try:
+                btn = page.get_by_role("button", name=label, exact=True).first
+                if await btn.count() > 0:
+                    await btn.click(timeout=2_000)
+                    opened = True
+                    break
+            except Exception:  # noqa: BLE001
+                continue
 
-    async def _open_combobox_by_label(self, page: Page, label: str) -> None:
-        await page.get_by_role("button", name=label).first.click()
+        if not opened:
+            logger.warning("[image] no pude abrir combobox (candidatos: {})", candidates[:4])
+            return
+
+        for label in target_labels:
+            try:
+                opt = page.get_by_role("option", name=label, exact=exact_option).first
+                if await opt.count() > 0:
+                    await opt.click(timeout=3_000)
+                    return
+            except Exception:  # noqa: BLE001
+                continue
+
+        logger.warning("[image] no pude seleccionar opción (targets: {})", target_labels)
+        await page.keyboard.press("Escape")
 
     async def wait_for_result(self, page: Page) -> dict[str, Any]:
         logger.info("[image] esperando resultado")
 
-        # Paso 1: esperar a que la URL cambie al detalle del job.
+        # Esperar a que la URL cambie al detalle del job (puede ser breve).
         await page.wait_for_url(
             self.JOB_URL_PATTERN,
             timeout=settings.generation_timeout_ms,
@@ -128,24 +169,43 @@ class ImageGenAdapter(GeneratorAdapter):
         job_id = match.group(1) if match else None
         logger.info("[image] job_id Envato: {}", job_id)
 
-        # Paso 2: esperar a que aparezcan las imágenes generadas con src real.
+        # Esperar a que aparezcan TODAS las imágenes de las variaciones solicitadas.
+        # Estrategia: devolver cuando tengamos `_expected_count` imágenes listas,
+        # o cuando el conteo no cambie durante `_STABLE_CYCLES_REQUIRED` × 2 s.
         deadline = settings.generation_timeout_ms / 1000
         elapsed = 0.0
-        srcs: list[str] = []
+        ready: list[str] = []
+        stable_cycles = 0
+
         while elapsed < deadline:
             srcs = await page.evaluate(
-                """() => Array.from(document.querySelectorAll('img[alt=\"Generated Image\"]'))
+                """() => Array.from(document.querySelectorAll('img[alt="Generated Image"]'))
                     .map(i => i.src).filter(Boolean)"""
             )
-            ready = [s for s in srcs if self.FINAL_SRC_PATTERN.search(s)]
-            if ready:
-                return {
-                    "envato_job_id": job_id,
-                    "image_srcs": ready,
-                    "page_url": page.url,
-                }
+            new_ready = [s for s in srcs if self.FINAL_SRC_PATTERN.search(s)]
+
+            if new_ready:
+                if len(new_ready) >= self._expected_count:
+                    logger.info("[image] {} imagen(es) listas (esperadas: {})",
+                                len(new_ready), self._expected_count)
+                    return {"envato_job_id": job_id, "image_srcs": new_ready, "page_url": page.url}
+
+                if len(new_ready) == len(ready):
+                    stable_cycles += 1
+                    if stable_cycles >= self._STABLE_CYCLES_REQUIRED:
+                        logger.info("[image] {} imagen(es) estable(s) tras {}s de espera",
+                                    len(new_ready), stable_cycles * 2)
+                        return {"envato_job_id": job_id, "image_srcs": new_ready, "page_url": page.url}
+                else:
+                    ready = new_ready
+                    stable_cycles = 0
+
             await asyncio.sleep(2)
             elapsed += 2
+
+        if ready:
+            logger.warning("[image] timeout — devolviendo {} imagen(es) parciales", len(ready))
+            return {"envato_job_id": job_id, "image_srcs": ready, "page_url": page.url}
 
         raise TimeoutError(
             f"[image] no aparecieron imágenes finales en {deadline}s. "
@@ -153,39 +213,46 @@ class ImageGenAdapter(GeneratorAdapter):
         )
 
     async def download(self, page: Page, meta: dict[str, Any]) -> GenerationResult:
-        """Descarga la primera imagen vía HTTP usando las cookies del contexto.
-
-        En vez de pelear con el menú nativo de descarga del navegador, usamos
-        page.request, que hereda las cookies del contexto y funciona limpiamente.
-        """
+        """Descarga todas las imágenes vía HTTP usando las cookies del contexto."""
         srcs: list[str] = meta["image_srcs"]
         if not srcs:
             raise RuntimeError("[image] meta sin image_srcs")
 
-        # La URL resized tiene un sufijo de tamaño; pedimos el original si existe.
-        src = srcs[0]
-        original = src.replace("gen-assets-resized.envatousercontent.com", "gen-assets.envatousercontent.com")
-        candidates = [original, src]
+        asset_urls: list[str] = []
+        asset_local_paths: list[str] = []
 
-        target = new_asset_path(self.name, ".png")
-        last_error: Exception | None = None
-        for candidate in candidates:
-            try:
-                logger.info("[image] descargando {}", candidate[:120])
-                response = await page.request.get(candidate)
-                if response.ok:
-                    target.write_bytes(await response.body())
-                    return GenerationResult(
-                        asset_url=public_url(target),
-                        asset_local_path=str(target),
-                        metadata={
-                            **meta,
-                            "downloaded_from": candidate,
-                            "all_image_srcs": srcs,
-                        },
-                    )
-                last_error = RuntimeError(f"HTTP {response.status} en {candidate}")
-            except Exception as exc:  # noqa: BLE001
-                last_error = exc
+        for src in srcs:
+            original = src.replace(
+                "gen-assets-resized.envatousercontent.com",
+                "gen-assets.envatousercontent.com",
+            )
+            target = new_asset_path(self.name, ".png")
+            downloaded = False
+            for candidate in (original, src):
+                try:
+                    logger.info("[image] descargando {}", candidate[:100])
+                    response = await page.request.get(candidate)
+                    if response.ok:
+                        target.write_bytes(await response.body())
+                        asset_local_paths.append(str(target))
+                        asset_urls.append(public_url(target))
+                        downloaded = True
+                        break
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("[image] error descargando {}: {}", candidate[:80], exc)
 
-        raise RuntimeError(f"[image] no pude descargar: {last_error}")
+            if not downloaded:
+                logger.warning("[image] no pude descargar {}", src[:80])
+
+        if not asset_urls:
+            raise RuntimeError("[image] no se pudo descargar ninguna imagen")
+
+        return GenerationResult(
+            asset_urls=asset_urls,
+            asset_local_paths=asset_local_paths,
+            metadata={
+                **meta,
+                "downloaded_urls": asset_urls,
+                "all_image_srcs": srcs,
+            },
+        )
