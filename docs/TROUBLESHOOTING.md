@@ -161,6 +161,22 @@ await page.locator(self.SUBMIT_BUTTON).first.click()
 
 El `:visible` descarta los elementos ocultos por CSS, y `.first` es la red de seguridad si aún quedan dos visibles.
 
+### `Locator.click` falla con `CybotCookiebotDialog ... intercepts pointer events`
+
+**Causa**: Cookiebot abre un modal de consentimiento que queda por encima de la UI y bloquea el click en `Generate`.
+
+**Solución**: cerrar Cookiebot antes de enviar el prompt y justo antes del submit.
+
+Selectores estables usados por el helper:
+
+```python
+"#CybotCookiebotDialog"
+"#CybotCookiebotDialog.CybotCookiebotDialogActive"
+"#CybotCookiebotDialogBodyButtonDecline"  # Reject all
+```
+
+Si no cierra por ID, usar fallback por texto visible (`Reject all`).
+
 ### Job se queda en `queued` y nunca arranca
 
 **Síntoma**: encolás un job, esperás minutos, sigue en `queued` con `started_at: null`.
@@ -219,6 +235,19 @@ http://192.168.1.160:8000/files/debug/image-<timestamp>.png
 ```
 
 El archivo `.url.txt` te dice dónde quedó el browser al fallar. El `.html` te deja inspeccionar el DOM exacto.
+
+### El job termina con `Timeout 300000ms` esperando `/image-gen/genai-image/...`
+
+**Causa**: la UI de Envato puede quedarse en `/image-gen` aunque la generación se haya procesado o fallado en el panel lateral. Esperar solo por cambio de URL termina en timeout falso.
+
+**Solución**: estrategia dual en `image` adapter:
+
+1. Intento corto de `wait_for_url` al patrón `/image-gen/genai-image/{uuid}`.
+2. Fallback a leer `[data-cy="details-panel"]` y resolver por estado visible:
+   - Éxito: `img[alt="Generated Image"]` con `src` de `gen-assets*.envatousercontent.com`.
+   - Error explícito: `All generations failed` o `Try again` (fail fast, sin esperar 300s).
+
+Con esto el job deja de quedar colgado cuando Envato no navega.
 
 ## API
 

@@ -20,7 +20,7 @@ import re
 from typing import Any
 
 from loguru import logger
-from playwright.async_api import Page
+from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
 from app.adapters.base import GenerationResult, GeneratorAdapter
 from app.config import settings
@@ -38,6 +38,8 @@ class ImageGenAdapter(GeneratorAdapter):
     PROMPT_INPUT = '[data-cy="prompt-input"]'
     SUBMIT_BUTTON = 'button[type="submit"][data-analytics-name="gen_click"]:visible'
     RESULT_IMAGE = 'img[alt="Generated Image"]'
+    DETAILS_PANEL = '[data-cy="details-panel"]'
+    FAST_FAILURE_MARKERS = ("All generations failed", "Try again")
 
     # Comboboxes detectados por su texto actual. Se localizan dinámicamente
     # porque el texto cambia con la selección del usuario.
@@ -66,6 +68,7 @@ class ImageGenAdapter(GeneratorAdapter):
             )
         # Esperar a que el formulario esté listo.
         await page.locator(self.PROMPT_INPUT).first.wait_for(state="visible")
+        await self.dismiss_cookiebot_if_present(page)
 
     async def submit(self, page: Page, payload: dict[str, Any]) -> None:
         prompt: str = payload["prompt"]
@@ -91,6 +94,9 @@ class ImageGenAdapter(GeneratorAdapter):
             # El botón "Style" abre un picker; el item se elige por texto exacto.
             await self._open_combobox_by_label(page, "Style")
             await page.get_by_role("option", name=style, exact=False).first.click()
+
+        # Si Cookiebot reapareció entre acciones, cerrarlo antes del submit.
+        await self.dismiss_cookiebot_if_present(page)
 
         # Disparar. .first como red de seguridad si :visible matchea más de uno.
         await page.locator(self.SUBMIT_BUTTON).first.click()
@@ -119,37 +125,110 @@ class ImageGenAdapter(GeneratorAdapter):
     async def wait_for_result(self, page: Page) -> dict[str, Any]:
         logger.info("[image] esperando resultado")
 
-        # Paso 1: esperar a que la URL cambie al detalle del job.
-        await page.wait_for_url(
-            self.JOB_URL_PATTERN,
-            timeout=settings.generation_timeout_ms,
-        )
-        match = self.JOB_URL_PATTERN.search(page.url)
-        job_id = match.group(1) if match else None
-        logger.info("[image] job_id Envato: {}", job_id)
+        # Paso 1 (rápido): intentar detectar transición de URL al job.
+        job_id: str | None = None
+        resolution_path = "panel"
+        try:
+            await page.wait_for_url(
+                self.JOB_URL_PATTERN,
+                timeout=min(15_000, settings.generation_timeout_ms),
+            )
+            match = self.JOB_URL_PATTERN.search(page.url)
+            job_id = match.group(1) if match else None
+            resolution_path = "url"
+            logger.info("[image] job_id Envato por URL: {}", job_id)
+        except PlaywrightTimeoutError:
+            logger.warning(
+                "[image] sin transición de URL al job, continúo por estado del panel"
+            )
 
-        # Paso 2: esperar a que aparezcan las imágenes generadas con src real.
+        # Paso 2: observar el panel activo para éxito o error explícito.
         deadline = settings.generation_timeout_ms / 1000
         elapsed = 0.0
         srcs: list[str] = []
+        last_panel_state: dict[str, Any] = {}
         while elapsed < deadline:
-            srcs = await page.evaluate(
-                """() => Array.from(document.querySelectorAll('img[alt=\"Generated Image\"]'))
-                    .map(i => i.src).filter(Boolean)"""
-            )
+            if "sign_in" in page.url or "/login" in page.url:
+                raise RuntimeError(
+                    "La sesión de Envato expiró durante la espera del resultado."
+                )
+
+            await self.dismiss_cookiebot_if_present(page)
+            panel_state = await self._read_active_panel_state(page)
+            last_panel_state = panel_state
+
+            if panel_state["job_id"] and not job_id:
+                job_id = panel_state["job_id"]
+
+            if panel_state["has_failure"]:
+                raise RuntimeError(
+                    f"[image] Envato reportó error explícito: {panel_state['failure_marker']}"
+                )
+
+            srcs = panel_state["image_srcs"]
             ready = [s for s in srcs if self.FINAL_SRC_PATTERN.search(s)]
             if ready:
                 return {
                     "envato_job_id": job_id,
                     "image_srcs": ready,
                     "page_url": page.url,
+                    "resolution_path": resolution_path,
                 }
             await asyncio.sleep(2)
             elapsed += 2
 
         raise TimeoutError(
             f"[image] no aparecieron imágenes finales en {deadline}s. "
-            f"srcs vistos: {srcs[:3]}"
+            f"srcs vistos: {srcs[:3]} | panel: {last_panel_state}"
+        )
+
+    async def _read_active_panel_state(self, page: Page) -> dict[str, Any]:
+        return await page.evaluate(
+            """
+            ({ detailsPanelSelector, resultImageSelector, failureMarkers }) => {
+              const visible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (style.visibility === "hidden" || style.display === "none") return false;
+                return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length);
+              };
+
+              const panels = Array.from(document.querySelectorAll(detailsPanelSelector));
+              const panel = panels.find(visible) || null;
+              if (!panel) {
+                return {
+                  has_panel: false,
+                  has_failure: false,
+                  failure_marker: null,
+                  job_id: null,
+                  image_srcs: [],
+                };
+              }
+
+              const text = panel.innerText || "";
+              const failureMarker = failureMarkers.find((m) => text.includes(m)) || null;
+              const imageSrcs = Array.from(panel.querySelectorAll(resultImageSelector))
+                .map((img) => img.src)
+                .filter(Boolean);
+              const jobHref = Array.from(panel.querySelectorAll('a[href*="/image-gen/genai-image/"]'))
+                .map((a) => a.getAttribute("href"))
+                .find(Boolean) || "";
+              const match = jobHref.match(/\\/image-gen\\/genai-image\\/([0-9a-f-]+)/);
+
+              return {
+                has_panel: true,
+                has_failure: !!failureMarker,
+                failure_marker: failureMarker,
+                job_id: match ? match[1] : null,
+                image_srcs: imageSrcs,
+              };
+            }
+            """,
+            {
+                "detailsPanelSelector": self.DETAILS_PANEL,
+                "resultImageSelector": self.RESULT_IMAGE,
+                "failureMarkers": list(self.FAST_FAILURE_MARKERS),
+            },
         )
 
     async def download(self, page: Page, meta: dict[str, Any]) -> GenerationResult:

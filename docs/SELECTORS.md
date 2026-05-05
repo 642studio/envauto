@@ -43,10 +43,11 @@ Confirmado y mapeado contra la UI real (mayo 2026).
 2. Click en `[data-cy="prompt-input"]` para enfocarlo.
 3. `fill()` el prompt en el contenteditable (Playwright lo soporta).
 4. Configurar opciones (aspect ratio, count, style) clickeando los comboboxes y los items.
-5. Click en `button[type="submit"][data-analytics-name="gen_click"]:visible` (texto "Generate").
-6. La URL cambia de `/image-gen` a `/image-gen/genai-image/{uuid}` cuando arranca la generación.
-7. Las imágenes resultantes aparecen como `img[alt="Generated Image"]`.
-8. El src es de `gen-assets-resized.envatousercontent.com` (versión resized) o `gen-assets.envatousercontent.com` (original).
+5. Si aparece Cookiebot, cerrarlo antes de submit (decline/reject).
+6. Click en `button[type="submit"][data-analytics-name="gen_click"]:visible` (texto "Generate").
+7. Resultado: si la URL cambia a `/image-gen/genai-image/{uuid}`, se usa ese path; si no cambia, se resuelve leyendo el panel activo.
+8. Éxito: `img[alt="Generated Image"]` dentro de `[data-cy="details-panel"]` con src en `gen-assets*.envatousercontent.com`.
+9. Falla explícita: texto `All generations failed` o `Try again` en el panel activo (fail fast).
 
 ### Selectores
 
@@ -55,10 +56,24 @@ URL = "https://app.envato.com/image-gen"
 PROMPT_INPUT = '[data-cy="prompt-input"]'
 SUBMIT_BUTTON = 'button[type="submit"][data-analytics-name="gen_click"]:visible'
 RESULT_IMAGE = 'img[alt="Generated Image"]'
+DETAILS_PANEL = '[data-cy="details-panel"]'
 
 JOB_URL_PATTERN = r"/image-gen/genai-image/([0-9a-f-]+)"
 FINAL_SRC_PATTERN = r"gen-assets-resized\.envatousercontent\.com|gen-assets\.envatousercontent\.com"
 ```
+
+### Selectores de Cookiebot (bloqueo de submit)
+
+Si el banner/modal de consentimiento está activo, intercepta el click del botón Generate.
+
+```python
+COOKIE_DIALOG = "#CybotCookiebotDialog"
+COOKIE_DIALOG_ACTIVE = "#CybotCookiebotDialog.CybotCookiebotDialogActive"
+COOKIE_REJECT_BUTTON = "#CybotCookiebotDialogBodyButtonDecline"
+COOKIE_REJECT_BUTTON_TEXT = "Reject all"
+```
+
+El helper común intenta cerrar Cookiebot en `navigate` y justo antes de `submit`.
 
 ### Opciones soportadas
 

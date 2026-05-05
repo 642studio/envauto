@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from loguru import logger
-from playwright.async_api import Page
+from playwright.async_api import Page, TimeoutError as PlaywrightTimeoutError
 
 from app.config import settings
 
@@ -56,6 +56,52 @@ class GeneratorAdapter(ABC):
         except Exception:
             await self._dump_debug(page)
             raise
+
+    async def dismiss_cookiebot_if_present(self, page: Page) -> bool:
+        """Cierra Cookiebot si está bloqueando la UI.
+
+        Es idempotente: si el modal no existe o ya está cerrado, no hace nada.
+        """
+        dialog = page.locator("#CybotCookiebotDialog")
+        if await dialog.count() == 0:
+            return False
+
+        active = page.locator("#CybotCookiebotDialog.CybotCookiebotDialogActive")
+        target = active if await active.count() > 0 else dialog
+
+        if not await target.first.is_visible():
+            return False
+
+        logger.info("[{}] Cookiebot detectado, intentando cerrarlo", self.name)
+
+        candidates = (
+            page.locator("#CybotCookiebotDialogBodyButtonDecline"),
+            page.get_by_role("button", name="Reject all", exact=False),
+            page.get_by_role("button", name="Reject All", exact=False),
+            page.get_by_role("button", name="Accept all", exact=False),
+        )
+
+        for button in candidates:
+            try:
+                if not await button.first.is_visible():
+                    continue
+                await button.first.click(timeout=3_000)
+                await target.first.wait_for(state="hidden", timeout=5_000)
+                logger.info("[{}] Cookiebot cerrado", self.name)
+                return True
+            except PlaywrightTimeoutError:
+                continue
+            except Exception:
+                continue
+
+        try:
+            await page.keyboard.press("Escape")
+            await target.first.wait_for(state="hidden", timeout=2_000)
+            logger.info("[{}] Cookiebot cerrado con Escape", self.name)
+            return True
+        except Exception:
+            logger.warning("[{}] Cookiebot sigue visible tras intentos de cierre", self.name)
+            return False
 
     async def _dump_debug(self, page: Page) -> None:
         """Guarda screenshot + HTML + URL al fallar el job, para inspeccionar después."""
