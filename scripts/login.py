@@ -19,7 +19,7 @@ from pathlib import Path
 # Permite correr el script directamente sin instalar el paquete.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from playwright.async_api import async_playwright  # noqa: E402
+from playwright.async_api import Error as PlaywrightError, async_playwright  # noqa: E402
 
 from app.config import settings  # noqa: E402
 
@@ -29,8 +29,11 @@ BANNER = """
   envautomatico - login interactivo
 ================================================================
 Te voy a abrir un Chromium real con Envato. Hacé login completo
-(usuario, contraseña, 2FA si tenés) y cuando estés DENTRO de tu
-cuenta, volvé a esta terminal y presioná ENTER.
+(usuario, contraseña, 2FA si tenés). Después abrí esta URL en el
+mismo browser y verificá que carga sin pedir login:
+  https://app.envato.com/image-gen
+
+Cuando la veas abierta, volvé a esta terminal y presioná ENTER.
 
 No cierres el navegador antes de presionar ENTER acá.
 ================================================================
@@ -58,6 +61,25 @@ async def main() -> None:
         await asyncio.get_event_loop().run_in_executor(
             None, input, "\n>>> Cuando hayas terminado el login, presioná ENTER acá: "
         )
+
+        # Validación: la sesión tiene que servir también para app.envato.com.
+        try:
+            await page.goto("https://app.envato.com/image-gen", wait_until="domcontentloaded")
+        except PlaywrightError as exc:
+            print(
+                "\n[error] El navegador o la pestaña se cerró antes de validar la sesión.\n"
+                "Mantené Chromium abierto hasta que termine el script."
+            )
+            await browser.close()
+            raise SystemExit(1) from exc
+        if "sign_in" in page.url or "/login" in page.url:
+            print(
+                "\n[error] Envato sigue pidiendo login en app.envato.com/image-gen.\n"
+                "Repetí el proceso y asegurate de abrir manualmente image-gen en el browser\n"
+                "antes de presionar ENTER."
+            )
+            await browser.close()
+            raise SystemExit(1)
 
         await context.storage_state(path=str(settings.storage_state_file))
         print(f"\n[ok] Sesión guardada en {settings.storage_state_file}")
