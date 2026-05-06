@@ -133,17 +133,33 @@ class ImageGenAdapter(GeneratorAdapter):
     ) -> None:
         """Abre el dropdown clickeando el chip y selecciona la opción por texto.
 
-        Los chips se localizan por data-cy (estables ante cambios de idioma).
-        Las opciones dentro del dropdown son <button> con el texto visible.
+        Antes de abrir verifica si el chip ya muestra el valor deseado para
+        evitar un toggle que deseleccionaría el valor actual.
         """
+        chip_loc = page.locator(chip).first
         try:
-            await page.locator(chip).first.click(timeout=5_000)
+            current = await chip_loc.inner_text(timeout=3_000)
+        except Exception:  # noqa: BLE001
+            current = ""
+
+        if option_text.strip().lower() in current.strip().lower():
+            logger.debug("[image] '{}' ya seleccionado en {}, skip", option_text, chip)
+            return
+
+        try:
+            await chip_loc.click(timeout=5_000)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[image] no pude abrir dropdown {}: {}", chip, exc)
             return
 
+        dropdown_loc = page.locator(dropdown)
         try:
-            option = page.locator(dropdown).get_by_text(option_text, exact=exact).first
+            await dropdown_loc.wait_for(state="visible", timeout=4_000)
+        except Exception:  # noqa: BLE001
+            pass
+
+        try:
+            option = dropdown_loc.locator("button").filter(has_text=option_text).first
             await option.click(timeout=5_000)
         except Exception as exc:  # noqa: BLE001
             logger.warning("[image] no pude seleccionar '{}' en {}: {}", option_text, dropdown, exc)
