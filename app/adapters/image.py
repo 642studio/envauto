@@ -116,6 +116,11 @@ class ImageGenAdapter(GeneratorAdapter):
                 exact=False,
             )
 
+        # Capturar las imágenes existentes antes de generar para filtrarlas después.
+        self._baseline_srcs: set[str] = set(await page.evaluate(
+            """() => Array.from(document.querySelectorAll('img[alt="Generated Image"]'))
+                .map(i => i.src).filter(Boolean)"""
+        ))
         await page.locator(self.SUBMIT_BUTTON).first.click()
 
     async def _select_dropdown(
@@ -147,41 +152,44 @@ class ImageGenAdapter(GeneratorAdapter):
     async def wait_for_result(self, page: Page) -> dict[str, Any]:
         logger.info("[image] esperando resultado")
 
-        # Esperar a que la URL cambie al detalle del job (puede ser breve).
-        await page.wait_for_url(
-            self.JOB_URL_PATTERN,
-            timeout=settings.generation_timeout_ms,
-        )
-        match = self.JOB_URL_PATTERN.search(page.url)
-        job_id = match.group(1) if match else None
+        # El URL del job (si aparece) es metadata opcional; no bloqueamos en él.
+        job_id: str | None = None
+        try:
+            await page.wait_for_url(self.JOB_URL_PATTERN, timeout=15_000)
+            match = self.JOB_URL_PATTERN.search(page.url)
+            job_id = match.group(1) if match else None
+        except Exception:  # noqa: BLE001
+            pass  # Envato puede no cambiar la URL en generaciones multi-variación
         logger.info("[image] job_id Envato: {}", job_id)
 
-        # Esperar a que aparezcan TODAS las imágenes de las variaciones solicitadas.
-        # Estrategia: devolver cuando tengamos `_expected_count` imágenes listas,
-        # o cuando el conteo no cambie durante `_STABLE_CYCLES_REQUIRED` × 2 s.
+        # Esperar imágenes NUEVAS (no estaban antes del click en Generate).
+        # Estrategia: devolver cuando tengamos `_expected_count` nuevas imágenes,
+        # o cuando el conteo nuevo no cambie durante `_STABLE_CYCLES_REQUIRED` × 2 s.
+        baseline = getattr(self, "_baseline_srcs", set())
         deadline = settings.generation_timeout_ms / 1000
         elapsed = 0.0
         ready: list[str] = []
         stable_cycles = 0
 
         while elapsed < deadline:
-            srcs = await page.evaluate(
+            all_srcs = await page.evaluate(
                 """() => Array.from(document.querySelectorAll('img[alt="Generated Image"]'))
                     .map(i => i.src).filter(Boolean)"""
             )
-            new_ready = [s for s in srcs if self.FINAL_SRC_PATTERN.search(s)]
+            new_ready = [
+                s for s in all_srcs
+                if self.FINAL_SRC_PATTERN.search(s) and s not in baseline
+            ]
 
             if new_ready:
                 if len(new_ready) >= self._expected_count:
-                    logger.info("[image] {} imagen(es) listas (esperadas: {})",
-                                len(new_ready), self._expected_count)
+                    logger.info("[image] {} imagen(es) nuevas listas", len(new_ready))
                     return {"envato_job_id": job_id, "image_srcs": new_ready, "page_url": page.url}
 
                 if len(new_ready) == len(ready):
                     stable_cycles += 1
                     if stable_cycles >= self._STABLE_CYCLES_REQUIRED:
-                        logger.info("[image] {} imagen(es) estable(s) tras {}s de espera",
-                                    len(new_ready), stable_cycles * 2)
+                        logger.info("[image] {} imagen(es) estables tras espera", len(new_ready))
                         return {"envato_job_id": job_id, "image_srcs": new_ready, "page_url": page.url}
                 else:
                     ready = new_ready
@@ -195,8 +203,8 @@ class ImageGenAdapter(GeneratorAdapter):
             return {"envato_job_id": job_id, "image_srcs": ready, "page_url": page.url}
 
         raise TimeoutError(
-            f"[image] no aparecieron imágenes finales en {deadline}s. "
-            f"srcs vistos: {srcs[:3]}"
+            f"[image] no aparecieron imágenes nuevas en {deadline}s. "
+            f"baseline={len(baseline)} imgs previas."
         )
 
     async def download(self, page: Page, meta: dict[str, Any]) -> GenerationResult:
