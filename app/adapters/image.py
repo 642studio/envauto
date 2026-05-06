@@ -64,7 +64,7 @@ class ImageGenAdapter(GeneratorAdapter):
 
     # Cuántos ciclos de 2 s sin cambio de cantidad se esperan antes de asumir
     # que ya cargaron todas las variaciones.
-    _STABLE_CYCLES_REQUIRED = 3  # 6 segundos
+    _STABLE_CYCLES_REQUIRED = 8  # 16 segundos — da margen para variaciones lentas
 
     def __init__(self) -> None:
         self._expected_count: int = 1
