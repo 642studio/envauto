@@ -35,25 +35,26 @@ class ImageGenAdapter(GeneratorAdapter):
     RESULT_IMAGE = 'img[alt="Generated Image"]'
 
     # Selectores data-cy para los chips (botones que abren el dropdown).
-    ASPECT_RATIO_CHIP    = '[data-cy="aspect-ratio-chip"]'
+    ASPECT_RATIO_CHIP     = '[data-cy="aspect-ratio-chip"]'
     ASPECT_RATIO_DROPDOWN = '[data-cy="aspect-ratio-dropdown"]'
-    VARIATIONS_CHIP      = '[data-cy="variations-chip"]'
-    VARIATIONS_DROPDOWN  = '[data-cy="variations-dropdown"]'
+    VARIATIONS_CHIP       = '[data-cy="variations-chip"]'
+    VARIATIONS_DROPDOWN   = '[data-cy="variations-dropdown"]'
 
-    # Texto exacto de las opciones dentro de cada dropdown (UI en español).
-    ASPECT_RATIO_VALUES: dict[str, str] = {
-        "1:1":  "Cuadrado",
-        "16:9": "Horizontal",
-        "9:16": "Vertical",
-        "4:3":  "Estándar",
-        "3:4":  "Alto",
+    # Labels en inglés Y español: el headless usa locale="en-US" pero la cuenta
+    # de Envato puede estar en español, así que probamos ambos.
+    ASPECT_RATIO_VALUES: dict[str, list[str]] = {
+        "1:1":  ["Square",    "Cuadrado"],
+        "16:9": ["Landscape", "Horizontal"],
+        "9:16": ["Portrait",  "Vertical"],
+        "4:3":  ["Standard",  "Estándar"],
+        "3:4":  ["Tall",      "Alto"],
     }
 
-    VARIATIONS_VALUES: dict[int, str] = {
-        1: "1 Variación",
-        2: "2 Variaciones",
-        3: "3 Variaciones",
-        4: "4 Variaciones",
+    VARIATIONS_VALUES: dict[int, list[str]] = {
+        1: ["1 Variation",  "1 Variación"],
+        2: ["2 Variations", "2 Variaciones"],
+        3: ["3 Variations", "3 Variaciones"],
+        4: ["4 Variations", "4 Variaciones"],
     }
 
     JOB_URL_PATTERN = re.compile(r"/image-gen/genai-image/([0-9a-f-]+)")
@@ -91,7 +92,7 @@ class ImageGenAdapter(GeneratorAdapter):
                 page,
                 chip=self.ASPECT_RATIO_CHIP,
                 dropdown=self.ASPECT_RATIO_DROPDOWN,
-                option_text=self.ASPECT_RATIO_VALUES[aspect_ratio],
+                option_texts=self.ASPECT_RATIO_VALUES[aspect_ratio],
             )
 
         variations = payload.get("variations")
@@ -100,7 +101,7 @@ class ImageGenAdapter(GeneratorAdapter):
                 page,
                 chip=self.VARIATIONS_CHIP,
                 dropdown=self.VARIATIONS_DROPDOWN,
-                option_text=self.VARIATIONS_VALUES[variations],
+                option_texts=self.VARIATIONS_VALUES[variations],
             )
             self._expected_count = variations
         else:
@@ -112,7 +113,7 @@ class ImageGenAdapter(GeneratorAdapter):
                 page,
                 chip='[data-cy="style-chip"]',
                 dropdown='[data-cy="style-dropdown"]',
-                option_text=style,
+                option_texts=[style],
                 exact=False,
             )
 
@@ -128,22 +129,22 @@ class ImageGenAdapter(GeneratorAdapter):
         page: Page,
         chip: str,
         dropdown: str,
-        option_text: str,
+        option_texts: list[str],
         exact: bool = True,
     ) -> None:
-        """Abre el dropdown clickeando el chip y selecciona la opción por texto.
+        """Abre el dropdown por data-cy y selecciona la opción por texto.
 
-        Antes de abrir verifica si el chip ya muestra el valor deseado para
-        evitar un toggle que deseleccionaría el valor actual.
+        Prueba cada label de `option_texts` (EN y ES) hasta que uno funcione.
+        Verifica si el chip ya muestra el valor antes de abrir para evitar toggle.
         """
         chip_loc = page.locator(chip).first
         try:
-            current = await chip_loc.inner_text(timeout=3_000)
+            current = (await chip_loc.inner_text(timeout=3_000)).strip().lower()
         except Exception:  # noqa: BLE001
             current = ""
 
-        if option_text.strip().lower() in current.strip().lower():
-            logger.debug("[image] '{}' ya seleccionado en {}, skip", option_text, chip)
+        if any(t.strip().lower() in current for t in option_texts):
+            logger.info("[image] '{}' ya seleccionado en {}, skip", option_texts[0], chip)
             return
 
         try:
@@ -152,18 +153,21 @@ class ImageGenAdapter(GeneratorAdapter):
             logger.warning("[image] no pude abrir dropdown {}: {}", chip, exc)
             return
 
-        dropdown_loc = page.locator(dropdown)
-        try:
-            await dropdown_loc.wait_for(state="visible", timeout=4_000)
-        except Exception:  # noqa: BLE001
-            pass
+        await asyncio.sleep(0.4)  # dropdown animation
 
-        try:
-            option = dropdown_loc.locator("button").filter(has_text=option_text).first
-            await option.click(timeout=5_000)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("[image] no pude seleccionar '{}' en {}: {}", option_text, dropdown, exc)
-            await page.keyboard.press("Escape")
+        dropdown_loc = page.locator(dropdown)
+        for text in option_texts:
+            try:
+                option = dropdown_loc.locator("button").filter(has_text=text).first
+                if await option.count() > 0:
+                    await option.click(timeout=3_000, force=True)
+                    logger.info("[image] seleccionado '{}' en {}", text, dropdown)
+                    return
+            except Exception:  # noqa: BLE001
+                continue
+
+        logger.warning("[image] no encontré opción {} en {}", option_texts, dropdown)
+        await page.keyboard.press("Escape")
 
     async def wait_for_result(self, page: Page) -> dict[str, Any]:
         logger.info("[image] esperando resultado")
