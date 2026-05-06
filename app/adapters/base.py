@@ -58,12 +58,49 @@ class GeneratorAdapter(ABC):
         """Ejecuta el ciclo completo. Si falla, guarda screenshot + HTML para debug."""
         try:
             await self.navigate(page)
+            await self._dismiss_cookie_banner(page)
             await self.submit(page, payload)
             meta = await self.wait_for_result(page)
             return await self.download(page, meta)
         except Exception:
             await self._dump_debug(page)
             raise
+
+    async def _dismiss_cookie_banner(self, page: Page) -> None:
+        """Descarta el banner de cookies/privacidad si está presente.
+
+        Elige la opción más privada (Reject all) automáticamente.
+        No falla si no hay banner.
+        """
+        # Cookiebot — Envato usa este proveedor. El script carga de forma asíncrona
+        # desde un CDN externo, por eso esperamos hasta 6 s a que el botón aparezca.
+        try:
+            btn = page.locator("#CybotCookiebotDialogBodyButtonDecline")
+            await btn.wait_for(state="visible", timeout=6_000)
+            await btn.click(timeout=3_000)
+            logger.info("[{}] banner Cookiebot descartado (Reject all)", self.name)
+            await page.wait_for_timeout(400)
+            return
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Fallback genérico para otros banners
+        candidates = [
+            'button:has-text("Reject all")',
+            'button:has-text("Rechazar todo")',
+            'button:has-text("Reject")',
+            'button:has-text("Decline")',
+        ]
+        for selector in candidates:
+            try:
+                btn = page.locator(selector).first
+                if await btn.is_visible():
+                    await btn.click(timeout=3_000)
+                    logger.info("[{}] banner de cookies descartado", self.name)
+                    await page.wait_for_timeout(300)
+                    return
+            except Exception:  # noqa: BLE001
+                continue
 
     async def _dump_debug(self, page: Page) -> None:
         """Guarda screenshot + HTML + URL al fallar el job, para inspeccionar después."""

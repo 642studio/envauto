@@ -222,6 +222,21 @@ class ImageGenAdapter(GeneratorAdapter):
             logger.warning("[image] timeout — devolviendo {} imagen(es) parciales", len(ready))
             return {"envato_job_id": job_id, "image_srcs": ready, "page_url": page.url}
 
+        # Fallback: Envato puede retornar resultados cacheados para el mismo prompt;
+        # esas imágenes ya estaban en baseline, así que no se detectaron como "nuevas".
+        # Tomamos las primeras N del DOM (las más recientes = generación actual).
+        fallback_srcs = await page.evaluate(
+            """() => Array.from(document.querySelectorAll('img[alt="Generated Image"]'))
+                .map(i => i.src).filter(Boolean)"""
+        )
+        fallback = [s for s in fallback_srcs if self.FINAL_SRC_PATTERN.search(s)][: self._expected_count]
+        if fallback:
+            logger.warning(
+                "[image] timeout con baseline saturado — {} imagen(es) cacheadas devueltas",
+                len(fallback),
+            )
+            return {"envato_job_id": job_id, "image_srcs": fallback, "page_url": page.url}
+
         raise TimeoutError(
             f"[image] no aparecieron imágenes nuevas en {deadline}s. "
             f"baseline={len(baseline)} imgs previas."

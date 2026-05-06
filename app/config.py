@@ -33,7 +33,7 @@ class Settings(BaseSettings):
     headless: bool = True
     browser_channel: str = "chromium"
     nav_timeout_ms: int = 60_000
-    generation_timeout_ms: int = 300_000
+    generation_timeout_ms: int = 600_000
 
     # Envato
     envato_login_url: str = "https://account.envato.com/sign_in"
