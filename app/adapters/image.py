@@ -34,21 +34,26 @@ class ImageGenAdapter(GeneratorAdapter):
     SUBMIT_BUTTON = 'button[type="submit"][data-analytics-name="gen_click"]:visible'
     RESULT_IMAGE = 'img[alt="Generated Image"]'
 
-    # Etiquetas en inglés y español para los comboboxes.
-    # Cada ratio/cantidad mapea a una tupla de posibles textos según el idioma de la UI.
-    ASPECT_RATIO_VALUES: dict[str, tuple[str, ...]] = {
-        "1:1":  ("Square", "Cuadrado"),
-        "16:9": ("Landscape", "Panorámico", "Horizontal"),
-        "9:16": ("Portrait", "Retrato", "Vertical"),
-        "4:3":  ("Standard", "Estándar"),
-        "3:4":  ("Tall", "Alto"),
+    # Selectores data-cy para los chips (botones que abren el dropdown).
+    ASPECT_RATIO_CHIP    = '[data-cy="aspect-ratio-chip"]'
+    ASPECT_RATIO_DROPDOWN = '[data-cy="aspect-ratio-dropdown"]'
+    VARIATIONS_CHIP      = '[data-cy="variations-chip"]'
+    VARIATIONS_DROPDOWN  = '[data-cy="variations-dropdown"]'
+
+    # Texto exacto de las opciones dentro de cada dropdown (UI en español).
+    ASPECT_RATIO_VALUES: dict[str, str] = {
+        "1:1":  "Cuadrado",
+        "16:9": "Horizontal",
+        "9:16": "Vertical",
+        "4:3":  "Estándar",
+        "3:4":  "Alto",
     }
 
-    VARIATIONS_VALUES: dict[int, tuple[str, ...]] = {
-        1: ("1 Variation",  "1 Variación"),
-        2: ("2 Variations", "2 Variaciones"),
-        3: ("3 Variations", "3 Variaciones"),
-        4: ("4 Variations", "4 Variaciones"),
+    VARIATIONS_VALUES: dict[int, str] = {
+        1: "1 Variación",
+        2: "2 Variaciones",
+        3: "3 Variaciones",
+        4: "4 Variaciones",
     }
 
     JOB_URL_PATTERN = re.compile(r"/image-gen/genai-image/([0-9a-f-]+)")
@@ -82,18 +87,20 @@ class ImageGenAdapter(GeneratorAdapter):
 
         aspect_ratio = payload.get("aspect_ratio")
         if aspect_ratio in self.ASPECT_RATIO_VALUES:
-            await self._change_combobox(
+            await self._select_dropdown(
                 page,
-                candidates=self._all_aspect_ratio_labels(),
-                target_labels=self.ASPECT_RATIO_VALUES[aspect_ratio],
+                chip=self.ASPECT_RATIO_CHIP,
+                dropdown=self.ASPECT_RATIO_DROPDOWN,
+                option_text=self.ASPECT_RATIO_VALUES[aspect_ratio],
             )
 
         variations = payload.get("variations")
         if isinstance(variations, int) and variations in self.VARIATIONS_VALUES:
-            await self._change_combobox(
+            await self._select_dropdown(
                 page,
-                candidates=self._all_variations_labels(),
-                target_labels=self.VARIATIONS_VALUES[variations],
+                chip=self.VARIATIONS_CHIP,
+                dropdown=self.VARIATIONS_DROPDOWN,
+                option_text=self.VARIATIONS_VALUES[variations],
             )
             self._expected_count = variations
         else:
@@ -101,61 +108,41 @@ class ImageGenAdapter(GeneratorAdapter):
 
         style = payload.get("style")
         if style:
-            await self._change_combobox(
+            await self._select_dropdown(
                 page,
-                candidates=["Style", "Estilo"],
-                target_labels=(style,),
-                exact_option=False,
+                chip='[data-cy="style-chip"]',
+                dropdown='[data-cy="style-dropdown"]',
+                option_text=style,
+                exact=False,
             )
 
         await page.locator(self.SUBMIT_BUTTON).first.click()
 
-    def _all_aspect_ratio_labels(self) -> list[str]:
-        return [label for labels in self.ASPECT_RATIO_VALUES.values() for label in labels]
-
-    def _all_variations_labels(self) -> list[str]:
-        return [label for labels in self.VARIATIONS_VALUES.values() for label in labels]
-
-    async def _change_combobox(
+    async def _select_dropdown(
         self,
         page: Page,
-        candidates: list[str],
-        target_labels: tuple[str, ...],
-        exact_option: bool = True,
+        chip: str,
+        dropdown: str,
+        option_text: str,
+        exact: bool = True,
     ) -> None:
-        """Abre un combobox probando cada label candidato (idioma-agnóstico),
-        luego selecciona la opción objetivo.
+        """Abre el dropdown clickeando el chip y selecciona la opción por texto.
 
-        `candidates` son los posibles textos del botón en el estado actual
-        (para abrirlo). `target_labels` son los posibles textos de la opción
-        a seleccionar (en distintos idiomas).
+        Los chips se localizan por data-cy (estables ante cambios de idioma).
+        Las opciones dentro del dropdown son <button> con el texto visible.
         """
-        opened = False
-        for label in candidates:
-            try:
-                btn = page.get_by_role("button", name=label, exact=True).first
-                if await btn.count() > 0:
-                    await btn.click(timeout=2_000)
-                    opened = True
-                    break
-            except Exception:  # noqa: BLE001
-                continue
-
-        if not opened:
-            logger.warning("[image] no pude abrir combobox (candidatos: {})", candidates[:4])
+        try:
+            await page.locator(chip).first.click(timeout=5_000)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[image] no pude abrir dropdown {}: {}", chip, exc)
             return
 
-        for label in target_labels:
-            try:
-                opt = page.get_by_role("option", name=label, exact=exact_option).first
-                if await opt.count() > 0:
-                    await opt.click(timeout=3_000)
-                    return
-            except Exception:  # noqa: BLE001
-                continue
-
-        logger.warning("[image] no pude seleccionar opción (targets: {})", target_labels)
-        await page.keyboard.press("Escape")
+        try:
+            option = page.locator(dropdown).get_by_text(option_text, exact=exact).first
+            await option.click(timeout=5_000)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[image] no pude seleccionar '{}' en {}: {}", option_text, dropdown, exc)
+            await page.keyboard.press("Escape")
 
     async def wait_for_result(self, page: Page) -> dict[str, Any]:
         logger.info("[image] esperando resultado")
