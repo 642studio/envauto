@@ -42,6 +42,7 @@ Esto es el corazón del diseño. **El login no se hace por petición**. Se hace 
 ## Documentación
 
 - **[docs/DEPLOY.md](docs/DEPLOY.md)** ── runbook paso a paso para deployar al VPS Linux con Docker.
+- **[docs/LIMITES_OPERATIVOS.md](docs/LIMITES_OPERATIVOS.md)** ── límites reales de operación, capacidad y recomendaciones para automatizaciones.
 - **[docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)** ── errores reales que ya pegamos y cómo resolvimos cada uno.
 - **[docs/SELECTORS.md](docs/SELECTORS.md)** ── selectores DOM mapeados por generador, con notas sobre estabilidad.
 - **[docs/STATUS.md](docs/STATUS.md)** ── estado actual del proyecto y próximos pasos.
