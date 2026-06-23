@@ -59,8 +59,44 @@ async def main() -> None:
             None, input, "\n>>> Cuando hayas terminado el login, presioná ENTER acá: "
         )
 
+        # Verificar que la sesión sirve PARA LA APP, no solo para account.envato.com.
+        # Navegamos a la app real y comprobamos que el prompt-input cargue. Esto, además,
+        # fuerza a que el contexto reciba las cookies + localStorage de app.envato.com,
+        # que es lo que el VPS necesita y lo que faltaba en capturas anteriores.
+        print(f"\nVerificando que la sesión sea válida en {settings.envato_ai_home} ...")
+        await page.goto(settings.envato_ai_home, wait_until="domcontentloaded")
+        await asyncio.sleep(3)
+        if "sign_in" in page.url or "/login" in page.url or "google/authenticate" in page.url:
+            print(
+                "\n[ERROR] La app sigue pidiendo login (URL: "
+                f"{page.url}).\n"
+                "No guardé nada. Hacé el login COMPLETO (incluyendo entrar a la app) "
+                "y volvé a apretar ENTER, o cerrá y reintentá."
+            )
+            await asyncio.get_event_loop().run_in_executor(
+                None, input, ">>> Entrá a la app manualmente y presioná ENTER para reintentar: "
+            )
+            await page.goto(settings.envato_ai_home, wait_until="domcontentloaded")
+            await asyncio.sleep(3)
+            if "sign_in" in page.url or "/login" in page.url or "google/authenticate" in page.url:
+                print(f"[ABORT] Sigue sin sesión válida (URL: {page.url}). No guardé nada.")
+                await browser.close()
+                return
+
+        has_prompt = await page.locator('[data-cy="prompt-input"]').count()
+        print(f"[ok] Sesión válida en la app. prompt-input detectado: {has_prompt}")
+
         await context.storage_state(path=str(settings.storage_state_file))
-        print(f"\n[ok] Sesión guardada en {settings.storage_state_file}")
+        # Sanity check del archivo guardado: tiene que tener cookies de app.envato.com.
+        import json as _json
+        saved = _json.loads(settings.storage_state_file.read_text())
+        app_cookies = [c for c in saved.get("cookies", []) if "app.envato.com" in c.get("domain", "")]
+        ls_origins = [o.get("origin") for o in saved.get("origins", [])]
+        print(f"[ok] Sesión guardada en {settings.storage_state_file}")
+        print(f"     cookies app.envato.com: {len(app_cookies)} | localStorage origins: {ls_origins or 'NINGUNO'}")
+        if not app_cookies and not ls_origins:
+            print("     [WARN] No se capturaron cookies/localStorage de la app. "
+                  "La sesión podría no servir en el VPS.")
         print(
             "Ahora subí ese archivo al VPS:\n"
             f"  scp {settings.storage_state_file} usuario@vps:/ruta/envautomatico/auth/\n"

@@ -1,7 +1,7 @@
 """Schemas Pydantic para request/response."""
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -36,10 +36,10 @@ class JobView(BaseModel):
     generator: str
     status: str
     created_at: float
-    started_at: float | None = None
-    finished_at: float | None = None
-    result: dict[str, Any] | None = None
-    error: str | None = None
+    started_at: Optional[float] = None
+    finished_at: Optional[float] = None
+    result: Optional[dict[str, Any]] = None
+    error: Optional[str] = None
 
 
 class HealthResponse(BaseModel):

@@ -37,7 +37,9 @@ class Settings(BaseSettings):
 
     # Envato
     envato_login_url: str = "https://account.envato.com/sign_in"
-    envato_ai_home: str = "https://www.envato.com/ai/"
+    # URL real de la app que requiere sesión. Se usa para validar el login y para
+    # el keepalive del SessionKeeper. www.envato.com/ai/ devuelve 404 hoy.
+    envato_ai_home: str = "https://app.envato.com/image-gen"
 
 
 settings = Settings()

@@ -21,7 +21,6 @@ from app.core.browser import browser_manager
 class SessionKeeper:
     """Loop en background que cuida la sesión persistente."""
 
-    SAVE_EVERY_S = 60 * 30          # 30 min: persistir cookies a disco
     PING_EVERY_S = 60 * 60 * 6      # 6 h:  navegar a Envato para mantener viva la sesión
     LOGIN_MARKERS = ("sign_in", "login")
 
@@ -55,20 +54,18 @@ class SessionKeeper:
 
     async def _loop(self) -> None:
         last_ping = 0.0
-        last_save = 0.0
         while True:
             await asyncio.sleep(60)
             now = asyncio.get_event_loop().time()
 
-            # Persistir storage_state periódicamente para no perder refreshes.
-            if now - last_save >= self.SAVE_EVERY_S:
-                try:
-                    await browser_manager.save_storage_state()
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("No pude guardar storage_state: {}", exc)
-                last_save = now
+            # NO guardamos storage_state acá: cada job ya lo persiste al cerrar su
+            # contexto en BrowserManager.page(). Hacerlo desde este loop llamaría a
+            # context.storage_state() CONCURRENTEMENTE sobre el contexto del job en
+            # curso, lo que rompía las generaciones de video (que duran >60s). Las de
+            # imagen no se veían afectadas porque terminan antes del primer tick.
 
-            # Ping de keepalive: abre una pestaña, navega, valida sesión.
+            # Ping de keepalive: abre una pestaña, navega, valida sesión. Usa page(),
+            # que toma el lock, así que nunca corre durante un job.
             if now - last_ping >= self.PING_EVERY_S:
                 await self._ping()
                 last_ping = now

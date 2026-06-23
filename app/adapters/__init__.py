@@ -1,10 +1,18 @@
 """Registro de adapters disponibles, indexado por nombre del generador."""
 from app.adapters.base import GeneratorAdapter
+from app.adapters.graphics import GraphicsGenAdapter
 from app.adapters.image import ImageGenAdapter
+from app.adapters.music import MusicGenAdapter
+from app.adapters.sound import SoundGenAdapter
+from app.adapters.video import VideoGenAdapter
 
 # Más adapters se agregan acá conforme los implementamos.
 ADAPTERS: dict[str, GeneratorAdapter] = {
     "image": ImageGenAdapter(),
+    "video": VideoGenAdapter(),
+    "sound": SoundGenAdapter(),
+    "music": MusicGenAdapter(),
+    "graphics": GraphicsGenAdapter(),
 }
 
 
