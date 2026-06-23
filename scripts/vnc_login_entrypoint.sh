@@ -17,8 +17,11 @@ echo "[vnc] arrancando window manager ..."
 fluxbox >/tmp/fluxbox.log 2>&1 &
 sleep 1
 
-echo "[vnc] arrancando x11vnc en 127.0.0.1:5900 (sin password, solo localhost) ..."
-x11vnc -display :99 -localhost -nopw -forever -shared -rfbport 5900 >/tmp/x11vnc.log 2>&1 &
+echo "[vnc] arrancando x11vnc en 0.0.0.0:5900 del container ..."
+# NO usar -localhost: ataría x11vnc al loopback DEL CONTAINER y el port-mapping de
+# Docker (host 127.0.0.1:5900 -> container 5900) no lo alcanzaría. La seguridad la da
+# el compose, que publica solo en 127.0.0.1 del host, y el acceso es por túnel SSH.
+x11vnc -display :99 -nopw -forever -shared -rfbport 5900 >/tmp/x11vnc.log 2>&1 &
 sleep 1
 
 cat <<'MSG'
