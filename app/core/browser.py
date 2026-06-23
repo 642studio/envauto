@@ -67,6 +67,8 @@ class BrowserManager:
             ),
             locale="en-US",
             timezone_id="America/New_York",
+            # soundGen descarga el audio vía el botón de descarga (download event).
+            accept_downloads=True,
         )
         context.set_default_timeout(settings.nav_timeout_ms)
         context.set_default_navigation_timeout(settings.nav_timeout_ms)
