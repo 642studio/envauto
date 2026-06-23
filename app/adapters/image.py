@@ -17,6 +17,9 @@ from __future__ import annotations
 
 import asyncio
 import re
+import shutil
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from loguru import logger
@@ -38,21 +41,27 @@ class ImageGenAdapter(GeneratorAdapter):
     PROMPT_INPUT = '[data-cy="prompt-input"]'
     SUBMIT_BUTTON = 'button[type="submit"][data-analytics-name="gen_click"]:visible'
     RESULT_IMAGE = 'img[alt="Generated Image"]'
+    # Overlay que tapa el botón Generate al cargar; hay que cerrarlo antes de enviar.
+    CALLOUT_CLOSE = '[data-cy="image-gen-shortcuts-feature-callout-close"]'
 
-    # Comboboxes detectados por su texto actual. Se localizan dinámicamente
-    # porque el texto cambia con la selección del usuario.
-    ASPECT_RATIO_VALUES = {
-        "1:1": "Square",
-        "16:9": "Landscape",
-        "9:16": "Portrait",
-        "4:3": "Standard",
-        "3:4": "Tall",
-    }
+    # Referencias: el botón revela un input[type=file] (multiple) que acepta jpeg/png/webp.
+    # Se pueden referenciar luego en el prompt con @image1, @image2, etc.
+    REFERENCE_BUTTON = '[data-cy="reference-images-button"]'
+    MAX_REFERENCES = 5
+    ALLOWED_REF_TYPES = ("image/jpeg", "image/jpg", "image/png", "image/webp")
 
-    VARIATIONS_VALUES = {1: "1 Variation", 2: "2 Variations", 3: "3 Variations", 4: "4 Variations"}
+    # Controles de opciones (UI junio 2026). Cada uno es un "chip" con data-cy
+    # que abre un dropdown; dentro, cada opción es un <button> con el texto del valor.
+    ASPECT_RATIO_CHIP = '[data-cy="aspect-ratio-chip"]'
+    ASPECT_RATIO_DROPDOWN = '[data-cy="aspect-ratio-dropdown"]'
+    VARIATIONS_CHIP = '[data-cy="variations-chip"]'
+    VARIATIONS_DROPDOWN = '[data-cy="variations-dropdown"]'
 
-    # Patrón de URL del job una vez que se dispara la generación.
-    JOB_URL_PATTERN = re.compile(r"/image-gen/genai-image/([0-9a-f-]+)")
+    # Aspect ratios: el texto de la opción es la notación directa ("1:1", "16:9", ...).
+    ASPECT_RATIO_VALUES = {"1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"}
+
+    # Variations: Envato hoy solo ofrece 1 y 3. El texto de la opción es "N Variation(s)".
+    VARIATIONS_VALUES = {1: "1 Variation", 3: "3 Variations"}
 
     # Patrón del src de la imagen final.
     FINAL_SRC_PATTERN = re.compile(r"gen-assets-resized\.envatousercontent\.com|gen-assets\.envatousercontent\.com")
@@ -67,89 +76,189 @@ class ImageGenAdapter(GeneratorAdapter):
         # Esperar a que el formulario esté listo.
         await page.locator(self.PROMPT_INPUT).first.wait_for(state="visible")
 
+        # CRÍTICO: al cargar, Envato muestra un "feature callout" (tip de shortcuts)
+        # que se superpone al botón Generate e intercepta el click, haciendo que la
+        # generación nunca arranque (este era EL bug que bloqueaba todo). Lo cerramos.
+        close_btn = page.locator(self.CALLOUT_CLOSE)
+        try:
+            if await close_btn.count():
+                await close_btn.first.click(timeout=3_000)
+                logger.info("[image] callout de shortcuts cerrado")
+        except Exception as exc:  # noqa: BLE001 - si no está o no se puede cerrar, seguimos
+            logger.debug("[image] no hubo callout que cerrar: {}", exc)
+
     async def submit(self, page: Page, payload: dict[str, Any]) -> None:
         prompt: str = payload["prompt"]
         logger.info("[image] enviando prompt ({} chars)", len(prompt))
 
-        # El prompt es un div contenteditable. fill() funciona en Playwright
-        # sobre contenteditable también.
+        # Baseline: qué imágenes ya están en la galería ANTES de generar. La URL no
+        # cambia al generar (las nuevas aparecen inline arriba), así que detectamos el
+        # resultado comparando contra este set. Ejecución serial => guardar en self es seguro.
+        self._baseline_srcs = set(await self._result_srcs(page))
+        logger.info("[image] baseline: {} imágenes previas", len(self._baseline_srcs))
+
+        # Referencias (opcional): URLs que descargamos y subimos al input de Envato.
+        # Se hace ANTES de escribir el prompt, así se pueden citar con @image1, @image2.
+        reference_images = payload.get("reference_images") or []
+        if reference_images:
+            await self._attach_references(page, reference_images)
+
+        # El prompt es un editor rich-text custom. fill() setea el DOM pero no siempre
+        # actualiza el modelo interno del editor; tipear con eventos reales sí lo hace.
         prompt_box = page.locator(self.PROMPT_INPUT).first
         await prompt_box.click()
-        await prompt_box.fill(prompt)
+        await page.keyboard.type(prompt)
+
+        # Si el prompt contiene un "@", Envato abre un autocomplete de menciones
+        # (role=listbox) que se superpone al botón Generate y bloquea el submit.
+        # Lo cerramos para no repetir el bug del callout. (Citar refs con @imageN
+        # requeriría elegir del picker; no soportado aún: usar prompts descriptivos.)
+        if "@" in prompt:
+            try:
+                if await page.locator('[role="listbox"]:visible').count():
+                    await page.keyboard.press("Escape")
+                    logger.info("[image] cerré autocomplete de menciones (@)")
+            except Exception:  # noqa: BLE001
+                pass
 
         # Opciones soportadas (todas opcionales).
         aspect_ratio = payload.get("aspect_ratio")
-        if aspect_ratio in self.ASPECT_RATIO_VALUES:
-            await self._set_combobox(page, self.ASPECT_RATIO_VALUES[aspect_ratio])
+        if aspect_ratio:
+            if aspect_ratio in self.ASPECT_RATIO_VALUES:
+                await self._select_chip_option(
+                    page, self.ASPECT_RATIO_CHIP, self.ASPECT_RATIO_DROPDOWN, aspect_ratio
+                )
+            else:
+                logger.warning("[image] aspect_ratio '{}' no soportado, lo ignoro", aspect_ratio)
 
         variations = payload.get("variations")
-        if isinstance(variations, int) and variations in self.VARIATIONS_VALUES:
-            await self._set_combobox(page, self.VARIATIONS_VALUES[variations])
-
-        style = payload.get("style")
-        if style:
-            # El botón "Style" abre un picker; el item se elige por texto exacto.
-            await self._open_combobox_by_label(page, "Style")
-            await page.get_by_role("option", name=style, exact=False).first.click()
+        if isinstance(variations, int):
+            if variations in self.VARIATIONS_VALUES:
+                await self._select_chip_option(
+                    page, self.VARIATIONS_CHIP, self.VARIATIONS_DROPDOWN,
+                    self.VARIATIONS_VALUES[variations],
+                )
+            else:
+                logger.warning(
+                    "[image] variations={} no soportado (válidos: {}), lo ignoro",
+                    variations, sorted(self.VARIATIONS_VALUES),
+                )
 
         # Disparar. .first como red de seguridad si :visible matchea más de uno.
         await page.locator(self.SUBMIT_BUTTON).first.click()
 
-    async def _set_combobox(self, page: Page, current_or_target_label: str) -> None:
-        """Click en un combobox cuyo texto visible es `current_or_target_label`,
-        después click en la opción del mismo nombre.
+    async def _select_chip_option(
+        self, page: Page, chip_selector: str, dropdown_selector: str, option_text: str
+    ) -> None:
+        """Abre un chip-combobox por su data-cy y clickea la opción cuyo texto exacto
+        es `option_text`.
 
-        Como el texto del botón refleja la selección actual, la primera vez
-        clickeamos sobre el valor por defecto, y la segunda vez sobre el deseado.
-        Si el valor ya estaba seleccionado no hace falta cambiarlo, así que
-        usamos el patrón abrir-y-elegir-target.
+        La UI de Envato renderiza cada control como un chip (`data-cy="..."`) que al
+        clickearse despliega un dropdown (`data-cy="...-dropdown"`) con un <button> por
+        opción. El texto del botón es el valor ("1:1", "3 Variations", etc.).
         """
-        await page.get_by_role("button", name=current_or_target_label).first.click()
-        # Esperar al menú emergente y seleccionar.
-        try:
-            await page.get_by_role("option", name=current_or_target_label).first.click(
-                timeout=5_000
-            )
-        except Exception:  # noqa: BLE001 - ya estaba seleccionado o el label difiere
-            await page.keyboard.press("Escape")
+        logger.info("[image] seleccionando '{}' en {}", option_text, chip_selector)
+        # Clickear el chip VISIBLE (hay variantes desktop/compact con el mismo data-cy).
+        await page.locator(f"{chip_selector}:visible").first.click()
 
-    async def _open_combobox_by_label(self, page: Page, label: str) -> None:
-        await page.get_by_role("button", name=label).first.click()
+        # Hay 2 dropdowns en el DOM (layout desktop + compact); solo uno se hace visible
+        # al abrir. Nos scopeamos al dropdown VISIBLE y buscamos la opción adentro por
+        # texto exacto, para no chocar con los botones del dropdown oculto.
+        dropdown = page.locator(f"{dropdown_selector}:visible").first
+        await dropdown.wait_for(state="visible", timeout=5_000)
+        await dropdown.get_by_role("button", name=option_text, exact=True).first.click(
+            timeout=5_000
+        )
+
+    async def _attach_references(self, page: Page, urls: list[str]) -> None:
+        """Descarga imágenes de referencia por URL y las sube al input de Envato.
+
+        El botón de referencias revela un `input[type=file]` (multiple) que acepta
+        jpeg/png/webp. Descargamos cada URL a un temp, validamos el tipo, y subimos
+        todas de una con set_input_files. Máximo 5 (las extra se ignoran con warning).
+        """
+        if not isinstance(urls, list):
+            raise RuntimeError("[image] reference_images debe ser una lista de URLs")
+        if len(urls) > self.MAX_REFERENCES:
+            logger.warning(
+                "[image] {} referencias recibidas, uso solo las primeras {}",
+                len(urls), self.MAX_REFERENCES,
+            )
+            urls = urls[: self.MAX_REFERENCES]
+
+        tmpdir = tempfile.mkdtemp(prefix="envauto-ref-")
+        try:
+            paths: list[str] = []
+            for i, url in enumerate(urls):
+                logger.info("[image] descargando referencia {}: {}", i + 1, str(url)[:120])
+                resp = await page.request.get(url)
+                if not resp.ok:
+                    raise RuntimeError(f"[image] referencia {i + 1}: HTTP {resp.status} en {url}")
+                body = await resp.body()
+                content_type = resp.headers.get("content-type", "").split(";")[0].strip().lower()
+                suffix = self._suffix_for(content_type, body)
+                if suffix == ".img":
+                    raise RuntimeError(
+                        f"[image] referencia {i + 1}: tipo no soportado "
+                        f"({content_type or 'desconocido'}). Permitidos: jpeg, png, webp."
+                    )
+                ref_path = Path(tmpdir) / f"ref_{i + 1}{suffix}"
+                ref_path.write_bytes(body)
+                paths.append(str(ref_path))
+
+            # Revelar el input y subir todos los archivos juntos (input multiple).
+            await page.locator(f"{self.REFERENCE_BUTTON}:visible").first.click()
+            file_input = page.locator('input[type="file"]').first
+            await file_input.wait_for(state="attached", timeout=5_000)
+            await file_input.set_input_files(paths)
+            logger.info("[image] {} referencia(s) adjuntada(s)", len(paths))
+            # Dar tiempo a que Envato procese/suba los thumbnails antes de generar.
+            await asyncio.sleep(3)
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    async def _result_srcs(self, page: Page) -> list[str]:
+        """Lista los src de todas las imágenes de resultado presentes en la galería."""
+        return await page.evaluate(
+            """() => Array.from(document.querySelectorAll('img[alt="Generated Image"]'))
+                .map(i => i.src).filter(Boolean)"""
+        )
 
     async def wait_for_result(self, page: Page) -> dict[str, Any]:
-        logger.info("[image] esperando resultado")
+        """Espera a que aparezcan imágenes NUEVAS respecto del baseline.
 
-        # Paso 1: esperar a que la URL cambie al detalle del job.
-        await page.wait_for_url(
-            self.JOB_URL_PATTERN,
-            timeout=settings.generation_timeout_ms,
-        )
-        match = self.JOB_URL_PATTERN.search(page.url)
-        job_id = match.group(1) if match else None
-        logger.info("[image] job_id Envato: {}", job_id)
-
-        # Paso 2: esperar a que aparezcan las imágenes generadas con src real.
+        La UI ya no cambia la URL al generar (antes iba a /image-gen/genai-image/{uuid});
+        los resultados se insertan inline arriba de la galería. Detectamos el resultado
+        comparando los src finales contra el baseline capturado en submit().
+        """
+        logger.info("[image] esperando resultado (sin cambio de URL)")
+        baseline = getattr(self, "_baseline_srcs", set())
         deadline = settings.generation_timeout_ms / 1000
         elapsed = 0.0
-        srcs: list[str] = []
         while elapsed < deadline:
-            srcs = await page.evaluate(
-                """() => Array.from(document.querySelectorAll('img[alt=\"Generated Image\"]'))
-                    .map(i => i.src).filter(Boolean)"""
-            )
-            ready = [s for s in srcs if self.FINAL_SRC_PATTERN.search(s)]
-            if ready:
-                return {
-                    "envato_job_id": job_id,
-                    "image_srcs": ready,
-                    "page_url": page.url,
-                }
+            srcs = await self._result_srcs(page)
+            new = [
+                s for s in srcs
+                if s not in baseline and self.FINAL_SRC_PATTERN.search(s)
+            ]
+            if new:
+                # Dar un margen para que terminen de cargar todas las variaciones,
+                # y re-capturar para devolver el set completo de nuevas imágenes.
+                await asyncio.sleep(4)
+                srcs2 = await self._result_srcs(page)
+                new2 = [
+                    s for s in srcs2
+                    if s not in baseline and self.FINAL_SRC_PATTERN.search(s)
+                ]
+                final = new2 or new
+                logger.info("[image] {} imagen(es) nueva(s) detectada(s)", len(final))
+                return {"image_srcs": final, "page_url": page.url}
             await asyncio.sleep(2)
             elapsed += 2
 
         raise TimeoutError(
-            f"[image] no aparecieron imágenes finales en {deadline}s. "
-            f"srcs vistos: {srcs[:3]}"
+            f"[image] no aparecieron imágenes nuevas en {deadline:.0f}s. "
+            f"La generación pudo fallar del lado de Envato."
         )
 
     async def download(self, page: Page, meta: dict[str, Any]) -> GenerationResult:
@@ -167,14 +276,18 @@ class ImageGenAdapter(GeneratorAdapter):
         original = src.replace("gen-assets-resized.envatousercontent.com", "gen-assets.envatousercontent.com")
         candidates = [original, src]
 
-        target = new_asset_path(self.name, ".png")
         last_error: Exception | None = None
         for candidate in candidates:
             try:
                 logger.info("[image] descargando {}", candidate[:120])
                 response = await page.request.get(candidate)
                 if response.ok:
-                    target.write_bytes(await response.body())
+                    body = await response.body()
+                    # El resizer devuelve format=auto (suele ser JPEG/WebP), así que la
+                    # extensión la sacamos del Content-Type real, no asumimos .png.
+                    suffix = self._suffix_for(response.headers.get("content-type", ""), body)
+                    target = new_asset_path(self.name, suffix)
+                    target.write_bytes(body)
                     return GenerationResult(
                         asset_url=public_url(target),
                         asset_local_path=str(target),
@@ -189,3 +302,23 @@ class ImageGenAdapter(GeneratorAdapter):
                 last_error = exc
 
         raise RuntimeError(f"[image] no pude descargar: {last_error}")
+
+    @staticmethod
+    def _suffix_for(content_type: str, body: bytes) -> str:
+        """Deriva la extensión del archivo desde el Content-Type, con fallback a los
+        magic bytes. Envato sirve format=auto, así que puede ser jpeg, webp o png."""
+        ct = content_type.lower()
+        if "webp" in ct:
+            return ".webp"
+        if "jpeg" in ct or "jpg" in ct:
+            return ".jpg"
+        if "png" in ct:
+            return ".png"
+        # Fallback por magic bytes si el header no fue claro.
+        if body[:3] == b"\xff\xd8\xff":
+            return ".jpg"
+        if body[:8] == b"\x89PNG\r\n\x1a\n":
+            return ".png"
+        if body[:4] == b"RIFF" and body[8:12] == b"WEBP":
+            return ".webp"
+        return ".img"
