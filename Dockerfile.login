@@ -6,6 +6,9 @@ FROM mcr.microsoft.com/playwright/python:v1.59.0-jammy
 WORKDIR /app
 
 # Xvfb (display virtual), x11vnc (servidor VNC) y fluxbox (window manager liviano).
+# DEBIAN_FRONTEND=noninteractive evita que tzdata (dependencia de x11vnc/fluxbox)
+# bloquee el build pidiendo la zona horaria de forma interactiva.
+ENV DEBIAN_FRONTEND=noninteractive TZ=America/New_York
 RUN apt-get update && apt-get install -y --no-install-recommends \
     xvfb x11vnc fluxbox \
     && rm -rf /var/lib/apt/lists/*
