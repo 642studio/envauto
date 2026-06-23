@@ -103,11 +103,12 @@ class ImageGenAdapter(GeneratorAdapter):
         if reference_images:
             await self._attach_references(page, reference_images)
 
-        # El prompt es un editor rich-text custom. fill() setea el DOM pero no siempre
-        # actualiza el modelo interno del editor; tipear con eventos reales sí lo hace.
+        # El prompt es un editor rich-text custom. fill() no actualiza su modelo interno;
+        # hay que tipear con eventos reales Y VERIFICAR que quedó (el editor a veces
+        # ignora el primer intento si aún no terminó de inicializarse, lo que dejaba el
+        # POST de generación con prompt vacío).
         prompt_box = page.locator(self.PROMPT_INPUT).first
-        await prompt_box.click()
-        await page.keyboard.type(prompt)
+        await self._type_prompt(page, prompt_box, prompt)
 
         # Si el prompt contiene un "@", Envato abre un autocomplete de menciones
         # (role=listbox) que se superpone al botón Generate y bloquea el submit.
@@ -146,6 +147,27 @@ class ImageGenAdapter(GeneratorAdapter):
 
         # Disparar. .first como red de seguridad si :visible matchea más de uno.
         await page.locator(self.SUBMIT_BUTTON).first.click()
+
+    async def _type_prompt(self, page: Page, prompt_box, prompt: str) -> None:
+        """Escribe el prompt y verifica que el editor lo capturó; reintenta si quedó
+        vacío (el editor rich-text a veces ignora el primer intento)."""
+        for attempt in range(3):
+            await prompt_box.click()
+            await page.keyboard.press("Control+A")
+            await page.keyboard.press("Delete")
+            await page.keyboard.type(prompt)
+            await asyncio.sleep(0.4)
+            try:
+                typed = (await prompt_box.inner_text()).strip()
+            except Exception:  # noqa: BLE001
+                typed = ""
+            if prompt.strip()[:20] in typed:
+                if attempt:
+                    logger.info("[image] prompt escrito en intento {}", attempt + 1)
+                return
+            logger.warning("[image] el editor no tomó el prompt (intento {}), reintento", attempt + 1)
+            await asyncio.sleep(0.8)
+        raise RuntimeError("[image] no pude escribir el prompt en el editor tras 3 intentos")
 
     async def _select_chip_option(
         self, page: Page, chip_selector: str, dropdown_selector: str, option_text: str

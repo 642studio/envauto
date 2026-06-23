@@ -1,8 +1,15 @@
-"""Manager de Playwright con contexto persistente.
+"""Manager de Playwright con navegador fresco por job.
 
-Mantiene un único navegador y un único contexto durante toda la vida del proceso.
-El contexto se crea con `storage_state` cargado desde `auth/storage_state.json`
-para reutilizar la sesión de Envato.
+Mantiene Playwright vivo durante toda la vida del proceso (es barato) pero lanza un
+Chromium NUEVO para cada job, con un contexto cargado desde `auth/storage_state.json`,
+y lo cierra al terminar (guardando la sesión).
+
+Por qué fresco por job y no un navegador/contexto persistente eterno: un proceso de
+navegador de larga vida que acumula muchas generaciones hace que Envato rechace EN
+SILENCIO las generaciones de VIDEO (las de imagen siguen andando, y la sesión queda
+válida). Se comprobó que recrear solo el contexto NO alcanza: hay que recrear el
+navegador entero. Un Chromium fresco por job —serializado por la cola, uno a la vez—
+evita el bloqueo y es más robusto.
 """
 from __future__ import annotations
 
@@ -17,46 +24,42 @@ from app.config import settings
 
 
 class BrowserManager:
-    """Mantiene un único navegador + contexto reutilizable.
+    """Navegador único + contexto fresco por operación.
 
     Pensado para correr serializado: el job runner toma `page()` para una operación,
-    el navegador queda vivo entre operaciones y la sesión se preserva.
+    que crea un contexto nuevo, lo usa, guarda la sesión y lo cierra. El navegador
+    queda vivo entre operaciones.
     """
 
     def __init__(self) -> None:
         self._playwright: Playwright | None = None
+        # Navegador y contexto de la operación en curso (None entre jobs). Se exponen
+        # para que save_storage_state() pueda persistir si se llama durante un job.
         self._browser: Browser | None = None
         self._context: BrowserContext | None = None
         self._lock = asyncio.Lock()
 
     async def start(self) -> None:
-        """Arranca Playwright, lanza el browser y crea el contexto persistente."""
-        if self._playwright is not None:
-            return
-
-        logger.info("Iniciando Playwright (headless={})", settings.headless)
-        self._playwright = await async_playwright().start()
-        self._browser = await self._playwright.chromium.launch(
-            headless=settings.headless,
-            args=["--disable-blink-features=AutomationControlled"],
-        )
-
-        storage_state = (
-            str(settings.storage_state_file)
-            if settings.storage_state_file.exists()
-            else None
-        )
-        if storage_state is None:
+        """No-op de arranque: cada job crea su propio Playwright en page(). Solo avisa
+        si falta la sesión."""
+        logger.info("BrowserManager listo (Playwright fresco por job, headless={})", settings.headless)
+        if not settings.storage_state_file.exists():
             logger.warning(
                 "No se encontró {}. Tenés que correr scripts/login.py primero.",
                 settings.storage_state_file,
             )
 
-        self._context = await self._browser.new_context(
+    async def _new_context(self, browser: Browser) -> BrowserContext:
+        """Crea un contexto fresco cargando la sesión de Envato desde disco."""
+        storage_state = (
+            str(settings.storage_state_file)
+            if settings.storage_state_file.exists()
+            else None
+        )
+        context = await browser.new_context(
             storage_state=storage_state,
             viewport={"width": 1440, "height": 900},
             # User-Agent consistente con el OS del contenedor (Ubuntu/Linux).
-            # Mentir el OS es la heurística #1 que usa el anti-bot.
             user_agent=(
                 "Mozilla/5.0 (X11; Linux x86_64) "
                 "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -65,16 +68,23 @@ class BrowserManager:
             locale="en-US",
             timezone_id="America/New_York",
         )
-        self._context.set_default_timeout(settings.nav_timeout_ms)
-        self._context.set_default_navigation_timeout(settings.nav_timeout_ms)
+        context.set_default_timeout(settings.nav_timeout_ms)
+        context.set_default_navigation_timeout(settings.nav_timeout_ms)
+        return context
 
     async def stop(self) -> None:
-        """Cierra navegador y Playwright limpiamente."""
+        """Cierra lo que haya abierto y Playwright limpiamente."""
         if self._context:
-            await self._context.close()
+            try:
+                await self._context.close()
+            except Exception:  # noqa: BLE001
+                pass
             self._context = None
         if self._browser:
-            await self._browser.close()
+            try:
+                await self._browser.close()
+            except Exception:  # noqa: BLE001
+                pass
             self._browser = None
         if self._playwright:
             await self._playwright.stop()
@@ -83,22 +93,47 @@ class BrowserManager:
 
     @asynccontextmanager
     async def page(self) -> AsyncIterator[Page]:
-        """Context manager que abre una página, la usa exclusivamente y la cierra.
+        """Lanza un Chromium fresco + contexto + página para una operación y los cierra.
 
-        El lock asegura que solo un job a la vez controle el navegador (v1 serial).
-        """
+        El lock asegura que solo un job a la vez use el navegador (v1 serial). Al cerrar,
+        guarda el storage_state para preservar refreshes de cookies.
+
+        Cada job usa su PROPIA instancia de Playwright + navegador (autocontenido), igual
+        que correr un script standalone. Reutilizar una instancia de Playwright de larga
+        vida (la del proceso uvicorn) hacía que Envato no completara las generaciones de
+        VIDEO; un Playwright fresco por job replica las condiciones que sí funcionan."""
         async with self._lock:
-            if self._context is None:
-                await self.start()
-            assert self._context is not None
-            page = await self._context.new_page()
-            try:
-                yield page
-            finally:
-                await page.close()
+            async with async_playwright() as pw:
+                browser = await pw.chromium.launch(
+                    headless=settings.headless,
+                    args=["--disable-blink-features=AutomationControlled"],
+                )
+                self._browser = browser
+                context = await self._new_context(browser)
+                self._context = context
+                page = await context.new_page()
+                try:
+                    yield page
+                finally:
+                    # Persistir la sesión (cookies/localStorage pueden haberse
+                    # refrescado) antes de descartar todo.
+                    try:
+                        await context.storage_state(path=str(settings.storage_state_file))
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning("No pude guardar storage_state al cerrar: {}", exc)
+                    for closer in (page.close, context.close, browser.close):
+                        try:
+                            await closer()
+                        except Exception:  # noqa: BLE001
+                            pass
+                    self._context = None
+                    self._browser = None
 
     async def save_storage_state(self) -> None:
-        """Guarda el estado actual a auth/storage_state.json (cookies + localStorage)."""
+        """Guarda el storage_state si hay un contexto activo (durante un job).
+
+        Entre jobs no hay contexto: la persistencia ya ocurre al cerrar cada contexto
+        en page(), así que acá simplemente no hay nada que guardar."""
         if self._context is None:
             return
         await self._context.storage_state(path=str(settings.storage_state_file))
@@ -106,8 +141,8 @@ class BrowserManager:
 
     @property
     def is_authenticated(self) -> bool:
-        """Heurística simple: existe el archivo de sesión y el contexto está cargado."""
-        return settings.storage_state_file.exists() and self._context is not None
+        """Heurística simple: existe el archivo de sesión (el browser se lanza por job)."""
+        return settings.storage_state_file.exists()
 
 
 # Singleton accesible desde routers y adapters.
