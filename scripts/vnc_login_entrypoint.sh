@@ -24,16 +24,8 @@ echo "[vnc] arrancando x11vnc en 0.0.0.0:5900 del container ..."
 x11vnc -display :99 -nopw -forever -shared -rfbport 5900 >/tmp/x11vnc.log 2>&1 &
 sleep 1
 
-cat <<'MSG'
-================================================================
-  VNC listo. Desde tu Mac:
-    1) Túnel SSH:   ssh -L 5900:localhost:5900 coreprorex@192.168.1.160
-    2) Cliente VNC: conectá a  localhost:5900   (sin contraseña)
-       (en macOS: Finder → Ir → Conectarse al servidor → vnc://localhost:5900)
-  Vas a ver un Chromium con la página de login de Envato.
-  Hacé el login completo (incluyendo 2FA) y volvé acá a presionar ENTER.
-================================================================
-MSG
+echo "[vnc] listo. Conectá por VNC (vía túnel SSH al 5900) y hacé el login."
 
 export DISPLAY=:99
-exec python scripts/login.py
+# Auto-detección: no requiere ENTER, guarda solo cuando detecta el login.
+exec python scripts/login_vnc_auto.py
