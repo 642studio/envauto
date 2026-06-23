@@ -1,0 +1,154 @@
+{
+  "name": "envato — generación on-demand (webhook)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "envato",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [240, 300],
+      "webhookId": "envato-generate"
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "a1", "name": "baseUrl", "value": "http://192.168.1.160:8000", "type": "string" },
+            { "id": "a2", "name": "token", "value": "PEGA_TU_API_TOKEN", "type": "string" },
+            { "id": "a3", "name": "generator", "value": "={{ $json.body.generator || 'image' }}", "type": "string" },
+            { "id": "a4", "name": "prompt", "value": "={{ $json.body.prompt }}", "type": "string" },
+            { "id": "a5", "name": "params", "value": "={{ $json.body.params || {} }}", "type": "object" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "config",
+      "name": "Config",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.baseUrl }}/generate/{{ $json.generator }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $json.token }}" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ prompt: $json.prompt, params: $json.params }) }}",
+        "options": {}
+      },
+      "id": "enqueue",
+      "name": "Encolar generación",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300]
+    },
+    {
+      "parameters": {
+        "assignments": {
+          "assignments": [
+            { "id": "b1", "name": "baseUrl", "value": "={{ $('Config').item.json.baseUrl }}", "type": "string" },
+            { "id": "b2", "name": "token", "value": "={{ $('Config').item.json.token }}", "type": "string" },
+            { "id": "b3", "name": "jobId", "value": "={{ $json.id }}", "type": "string" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "savejob",
+      "name": "Guardar jobId",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.4,
+      "position": [900, 300]
+    },
+    {
+      "parameters": {
+        "amount": 8,
+        "unit": "seconds"
+      },
+      "id": "wait",
+      "name": "Esperar",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [1120, 300],
+      "webhookId": "envato-wait"
+    },
+    {
+      "parameters": {
+        "url": "={{ $('Guardar jobId').item.json.baseUrl }}/jobs/{{ $('Guardar jobId').item.json.jobId }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $('Guardar jobId').item.json.token }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "poll",
+      "name": "Consultar job",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1340, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "loose" },
+          "conditions": [
+            {
+              "id": "c1",
+              "leftValue": "={{ $json.status }}",
+              "rightValue": "queued,running",
+              "operator": { "type": "string", "operation": "notContains" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "isdone",
+      "name": "¿Terminó?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [1560, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: $json.status, generator: $json.generator, asset_url: ($json.result || {}).asset_url || null, error: $json.error || null, job: $json }) }}",
+        "options": {}
+      },
+      "id": "respond",
+      "name": "Responder",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1780, 200]
+    }
+  ],
+  "connections": {
+    "Webhook": { "main": [[{ "node": "Config", "type": "main", "index": 0 }]] },
+    "Config": { "main": [[{ "node": "Encolar generación", "type": "main", "index": 0 }]] },
+    "Encolar generación": { "main": [[{ "node": "Guardar jobId", "type": "main", "index": 0 }]] },
+    "Guardar jobId": { "main": [[{ "node": "Esperar", "type": "main", "index": 0 }]] },
+    "Esperar": { "main": [[{ "node": "Consultar job", "type": "main", "index": 0 }]] },
+    "Consultar job": { "main": [[{ "node": "¿Terminó?", "type": "main", "index": 0 }]] },
+    "¿Terminó?": {
+      "main": [
+        [{ "node": "Responder", "type": "main", "index": 0 }],
+        [{ "node": "Esperar", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": { "executionOrder": "v1" }
+}
