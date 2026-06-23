@@ -270,24 +270,32 @@ curl -X POST http://192.168.1.160:8000/generate/image -H "Authorization: Bearer 
 
 O pegá el bloque sin líneas en blanco entre las continuaciones.
 
-## Anti-bot / Envato
+## Generaciones que fallan en silencio (causas reales)
 
-### El job genera screenshot en `/login` o pantalla de "verify human"
+Durante mucho tiempo se creyó que el problema era detección anti-bot/headless. **Es falso**: se generan assets en headless sin problema. Cuando una generación "no produce nada" (queda en "Generating" o el job da timeout sin asset), la causa casi siempre es una de estas:
 
-**Causa**: Envato detectó automatización. Pasa más en headless que en headed.
+### El job clickea Generate pero nunca arranca / el prompt queda escrito
 
-**Mitigaciones que ya están en el código**:
+**Causa A — overlay tapando Generate**: al cargar, Envato muestra un *feature callout* (`image-gen-shortcuts-feature-callout`) que se superpone al botón Generate e intercepta el click. La generación nunca se dispara.
+**Solución**: cerrarlo en `navigate()` (`[data-cy="image-gen-shortcuts-feature-callout-close"]`). Ya está en todos los adapters.
 
-- User-Agent consistente con el OS del contenedor (Linux x86_64, no Mac).
-- `--disable-blink-features=AutomationControlled` al lanzar Chromium.
-- Locale `en-US` y timezone `America/New_York` explícitos.
-- Sesión real cargada via `storage_state` (cookies legítimas).
+**Causa B — prompt vacío**: el editor rich-text a veces ignora el primer `keyboard.type` si la página recién cargó. El POST de generación sale con `prompt=` vacío y Envato falla EN SILENCIO (sin error, sin asset). Se ve sobre todo en video (su editor tarda más).
+**Solución**: `_type_prompt` escribe, **verifica** que el editor lo tomó, y reintenta. Si ves en logs "el editor no tomó el prompt (intento 1)", el reintento lo arregló.
+**Diagnóstico**: comparar el body del POST a `/{gen}-gen.data` — debe tener `prompt=<texto>`, no `prompt=`.
 
-**Si aún así te detectan**, las opciones por orden de simplicidad:
+### El video queda en "Generating" para siempre (timeout a 300s)
 
-1. Agregar `playwright-stealth` que parchea fingerprints comunes.
-2. Correr en modo headed con `Xvfb` (display virtual) en lugar de headless.
-3. Agregar delays aleatorios entre acciones para parecer más humano.
+**Causa**: un navegador/contexto de Playwright de larga vida (reusado entre muchos jobs) hace que Envato no complete las generaciones de **video** (las de imagen, más cortas, sí pasan). Y el `SessionKeeper` guardando `storage_state` concurrentemente sobre el contexto del job en curso rompía las generaciones de >60s.
+**Solución**: navegador **fresco por job** (`browser.py`) + se eliminó el save periódico del SessionKeeper. La generación corre server-side; el completado llega por `wss://ai-platform.app.envato.com/ws`.
+
+### La sesión se cae a `/sign_in` de golpe
+
+**Causa**: abrir muchos contextos/navegadores Playwright frescos en ráfaga (ej. debuggeando) invalida la sesión del lado del servidor.
+**Solución**: en operación normal la cola serializa (un navegador a la vez). No abrir muchos contextos en paralelo para probar.
+
+### Mitigaciones anti-fingerprint que están en el código (por las dudas)
+
+- User-Agent Linux, `--disable-blink-features=AutomationControlled`, locale `en-US`, timezone `America/New_York`, sesión real vía `storage_state`. No fueron necesarias para destrabar nada, pero quedan como base sensata.
 
 ## Debugging que nos sirvió
 

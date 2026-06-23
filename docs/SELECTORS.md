@@ -27,74 +27,78 @@ Estos los confirmamos en imageGen y muy probablemente apliquen al resto de los g
 | Elemento | Selector |
 | -------- | -------- |
 | Prompt input (contenteditable div) | `[data-cy="prompt-input"]` |
-| Submit button | `button[type="submit"][data-analytics-name="gen_click"]:visible` |
-| Comboboxes de opciones | `<button>` cuyo texto refleja el valor actual ("Square", "3 Variations", "Style") |
-| Items del menú de opciones | `role="option"` con `name` igual al valor |
+| Submit button | `button[data-analytics-name="gen_click"]:visible` (texto "Generate") |
+| Chips de opciones | `[data-cy="...-chip"]` (role=combobox) que abre `[data-cy="...-dropdown"]` |
+| Items del dropdown | `<button>` con texto exacto del valor, DENTRO del dropdown visible |
+| Overlay a cerrar al cargar | `[data-cy="image-gen-shortcuts-feature-callout-close"]` (tapa Generate) |
+| Resultado (imágenes) | `img[alt="Generated Image"]`, src en `gen-assets-resized.envatousercontent.com` |
+| Resultado (videos) | `<video>` dentro de `[data-cy="item-card"]`, src en `gen-assets.app.envatousercontent.com` |
+| Cards de la galería | `[data-cy="item-card"]` con `[data-cy="item-action-download"]` |
+
+**Importante**: la URL **no** cambia al generar (antes iba a `/image-gen/genai-image/{uuid}`). El resultado se detecta por asset nuevo en la galería respecto de un baseline tomado antes de Generate. El prompt se escribe con `keyboard.type` Y se verifica con reintento (el editor a veces ignora el primer intento → POST con prompt vacío). El completado de video/sound/music llega por WebSocket a `wss://ai-platform.app.envato.com/ws`.
 
 ## imageGen
 
-URL: `https://app.envato.com/image-gen`
-
-Confirmado y mapeado contra la UI real (mayo 2026).
-
-### Flujo
-
-1. Navegar a `/image-gen`.
-2. Click en `[data-cy="prompt-input"]` para enfocarlo.
-3. `fill()` el prompt en el contenteditable (Playwright lo soporta).
-4. Configurar opciones (aspect ratio, count, style) clickeando los comboboxes y los items.
-5. Click en `button[type="submit"][data-analytics-name="gen_click"]:visible` (texto "Generate").
-6. La URL cambia de `/image-gen` a `/image-gen/genai-image/{uuid}` cuando arranca la generación.
-7. Las imágenes resultantes aparecen como `img[alt="Generated Image"]`.
-8. El src es de `gen-assets-resized.envatousercontent.com` (versión resized) o `gen-assets.envatousercontent.com` (original).
-
-### Selectores
+URL: `https://app.envato.com/image-gen`. Mapeado contra UI real (junio 2026).
 
 ```python
-URL = "https://app.envato.com/image-gen"
 PROMPT_INPUT = '[data-cy="prompt-input"]'
 SUBMIT_BUTTON = 'button[type="submit"][data-analytics-name="gen_click"]:visible'
+CALLOUT_CLOSE = '[data-cy="image-gen-shortcuts-feature-callout-close"]'
 RESULT_IMAGE = 'img[alt="Generated Image"]'
-
-JOB_URL_PATTERN = r"/image-gen/genai-image/([0-9a-f-]+)"
-FINAL_SRC_PATTERN = r"gen-assets-resized\.envatousercontent\.com|gen-assets\.envatousercontent\.com"
+ASPECT_RATIO_CHIP = '[data-cy="aspect-ratio-chip"]'      # dropdown: [data-cy="aspect-ratio-dropdown"]
+VARIATIONS_CHIP   = '[data-cy="variations-chip"]'        # dropdown: [data-cy="variations-dropdown"]
+REFERENCE_BUTTON  = '[data-cy="reference-images-button"]'  # revela input[type=file] multiple
+FINAL_SRC_PATTERN = r"gen-assets(-resized)?\.envatousercontent\.com"
 ```
 
-### Opciones soportadas
+Opciones (texto exacto de la opción en el dropdown):
+- `aspect_ratio`: `Auto`, `1:1`, `16:9`, `9:16`, `4:3`, `3:4`, `3:2`, `2:3` (notación directa, ya NO "Square"/"Landscape").
+- `variations`: `1 Variation`, `3 Variations` (solo 1 y 3).
+- `reference_images`: click `reference-images-button` → `input[type=file].set_input_files([...])` (acepta jpeg/png/webp, multiple, hasta 5).
 
-Detectadas como botones-combobox cuyo texto muestra el valor actual:
+Descarga: `page.request.get(src)` (reutiliza cookies). La extensión se saca del Content-Type real (jpg/webp/png), no se asume .png.
 
-| Param | Valores posibles | Texto del botón |
-| ----- | ---------------- | --------------- |
-| `aspect_ratio` | `1:1` | `Square` |
-| `aspect_ratio` | `16:9` | `Landscape` |
-| `aspect_ratio` | `9:16` | `Portrait` |
-| `aspect_ratio` | `4:3` | `Standard` |
-| `aspect_ratio` | `3:4` | `Tall` |
-| `variations` | 1 a 4 | `1 Variation` / `2 Variations` / `3 Variations` / `4 Variations` |
-| `style` | nombres del picker | varía según presets de Envato |
+## videoGen
 
-### Descarga
-
-En lugar de pelear con el menú nativo del navegador, usamos `page.request.get(src)` que reutiliza las cookies del contexto y baja directo. Más rápido y predecible.
+URL: `https://app.envato.com/video-gen`.
 
 ```python
-src = first(image_srcs)
-original = src.replace("gen-assets-resized.", "gen-assets.")
-response = await page.request.get(original)
-target.write_bytes(await response.body())
+SUBMIT_BUTTON = 'button[data-analytics-name="gen_click"]:visible'
+ASPECT_RATIO_CHIP = '[data-cy="video-aspect-ratio-chip"]'   # 16:9, 9:16
+AUDIO_CHIP        = '[data-cy="video-audio-chip"]'          # "With audio" / "No audio"
+# Uploads por pestañas (botones por texto): "Start frame", "End frame", "Images"
+#   - cada pestaña revela un input[type=file]; "Images" es multiple (refs), frames son single
+#   - "End frame" suele estar disabled (rollout) → se omite
 ```
 
-## videoGen, musicGen, voiceGen, soundGen, graphicsGen
+Resultado: `<video>` dentro de `[data-cy="item-card"]`, src en `gen-assets.app.envatousercontent.com` (URL firmada S3, expira ~1h). Detección: primer item-card con `<video src>` nuevo vs baseline. Descarga: `page.request.get(video_src)` → `.mp4`.
 
-URLs:
-- `https://app.envato.com/video-gen`
-- `https://app.envato.com/music-gen`
-- `https://app.envato.com/voice-gen`
-- `https://app.envato.com/sound-gen`
-- `https://app.envato.com/graphics-gen`
+## soundGen / musicGen
 
-**No mapeados todavía**. Cuando se implementen, intentar primero los mismos selectores que imageGen y solo cambiar el patrón de URL del job (`/video-gen/genai-video/{uuid}`, etc.) y el alt de los assets.
+URLs: `https://app.envato.com/sound-gen`, `https://app.envato.com/music-gen`. Salida: audio (mp3).
+
+```python
+# soundGen
+DURATION_CHIP = '[data-cy="duration-chip"]'   # popover con [role=slider] aria-valuenow (0–25s); flechas del teclado
+# botón "Loop" (toggle)
+# musicGen
+ENERGY_CHIP = '[data-cy="music-energy-chip"]'  # dropdown: Auto/Muted/Low/Medium/High/Very High
+# botones "Genre" / "Themes" (pickers multi-select, no mapeados) y "No lyrics" (toggle)
+```
+
+Resultado: la generación agrega item-cards (sound = 5 variaciones, music = 3). Los `<audio>` cargan lazy (sin src en el DOM), así que el audio se baja con el botón `[data-cy="item-action-download"]`, que dispara un **download event** de Playwright (requiere `accept_downloads=True` en el contexto). Detección: aumento de `[data-cy="item-card"]` vs baseline.
+
+## graphicsGen
+
+URL: `https://app.envato.com/graphics-gen`. Casi idéntico a imageGen (mismos chips aspect_ratio/variations, reference-images-button, resultado `img[alt="Generated Image"]`); el adapter **hereda de imageGen**.
+
+- Extra: `transparent_background` ── botón aria-label "Solid" que al abrirse ofrece "Transparent".
+- Descarga: el botón `item-action-download` abre un menú con `[data-cy="download-original"]` (PNG nativo), `download-upscale-2x`, `download-upscale-4x`, `download-svg`. Se usa "Original size". La transparencia real solo vive en el SVG (el download-svg no dispara download event de forma confiable → pendiente).
+
+## voiceGen
+
+No se implementa: el caso de voz se maneja por fuera con ElevenLabs.
 
 ## mockupGen (caso aparte)
 

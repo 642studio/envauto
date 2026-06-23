@@ -1,62 +1,51 @@
 # Estado del proyecto
 
-Última actualización: 2026-05-05
+Última actualización: 2026-06-23
 
-## Funciona
+## Funciona (end-to-end por la API)
 
-- **Scaffolding completo** del proyecto: FastAPI, BrowserManager con contexto persistente, JobQueue, SessionKeeper, base adapter, login interactivo CLI, Dockerfile, docker-compose.
-- **Deploy a VPS Linux** con Docker. Probado en `192.168.1.160` con usuario sin sudo automático en `/opt/`.
-- **Sesión persistente de Envato**. El login se hace una vez en local con `scripts/login.py`, se sube el `storage_state.json` al VPS, y el contenedor levanta un Chromium que reutiliza la sesión para todas las peticiones. `/health` reporta `authenticated: true` correctamente.
-- **API REST**: `/health`, `POST /generate/{tipo}`, `GET /jobs/{id}`, `POST /admin/storage-state`, `/files/...`. Todo con bearer token salvo `/health` y `/files/...`.
-- **Job queue serial** con un solo worker. Encola, ejecuta y reporta status pasando por `queued -> running -> completed | failed`.
-- **Debug automático en fallos**: cada job que falla guarda screenshot + HTML + URL en `storage/debug/`, accesibles desde el navegador en `/files/debug/`.
-- **Selectores de imageGen mapeados** contra UI real:
-  - Prompt input: `[data-cy="prompt-input"]` (contenteditable div).
-  - Submit button: `button[type="submit"][data-analytics-name="gen_click"]:visible`.
-  - URL pattern del job: `/image-gen/genai-image/{uuid}`.
-  - Imágenes resultado: `img[alt="Generated Image"]` con src en `gen-assets-resized.envatousercontent.com`.
+**6 generadores validados** con jobs que terminan `completed` y devuelven un asset real descargable, servido en `/files/`:
 
-## En debug ahora mismo
+| Generador | Salida | Opciones soportadas |
+| --------- | ------ | ------------------- |
+| `image`    | jpg/png/webp | `aspect_ratio`, `variations` (1/3), `reference_images` (hasta 5) |
+| `video`    | mp4   | `aspect_ratio` (16:9/9:16), `audio`, `first_frame`, `last_frame`*, `reference_images` |
+| `sound`    | mp3   | `duration` (1–25s), `loop` |
+| `music`    | mp3   | `energy` (auto…very high) |
+| `graphics` | png   | `aspect_ratio`, `variations`, `reference_images`, `transparent_background`** |
 
-**Síntoma**: el adapter de imageGen llega a clickear "Generate" pero la generación termina con error porque Envato muestra "All generations failed" en el historial.
+\* `last_frame` (videoGen) suele estar deshabilitado en la cuenta (rollout de Envato); si lo está, se omite con warning.
+\*\* `transparent_background` activa la opción en Envato pero el PNG descargado sale opaco (la transparencia real solo está en el SVG, aún no automatizable).
 
-**Hipótesis**: dos posibles causas y hay que distinguir entre ellas:
+- `voice` ── se maneja por fuera con ElevenLabs.
+- `mockup` ── pendiente (vive en `labs.envato.com`, mapeo desde cero).
 
-1. **Envato backend está fallando para todas las generaciones** (incluso manuales). Si esto es así, no es problema nuestro y se resuelve solo cuando Envato vuelve. Validable abriendo `app.envato.com/image-gen` manualmente y probando.
+Además: API REST con bearer token, job queue serial (`queued → running → completed | failed`), debug automático en fallos (screenshot + HTML + URL en `storage/debug/`), deploy a VPS con Docker.
 
-2. **Envato detecta automatización y bloquea silenciosamente** la generación pero deja la sesión válida. Validable comparando: si el mismo prompt funciona desde el browser manual y falla desde el adapter, es esto.
+## Causa raíz de los bloqueos (resueltos)
 
-**Próximo paso**: validar la hipótesis con un test manual. Si es la #2, mitigaciones por orden de simplicidad:
-- Agregar `playwright-stealth` para parchear fingerprints comunes.
-- Aumentar delays naturales entre acciones (typing speed, pausas entre clicks).
-- Correr Chromium en modo headed con `Xvfb` en lugar de headless.
+Lo que tenía trabado al proyecto NO era detección anti-bot/headless (hipótesis vieja, **descartada**: se generan assets en headless sin problema). Eran bugs concretos:
+
+1. **API no arrancaba en Python 3.9** ── los modelos Pydantic usaban `float | None`, que Pydantic evalúa en runtime y no existe en 3.9. → `Optional[...]` en `schemas.py`.
+2. **Un overlay tapaba el botón Generate** (`image-gen-shortcuts-feature-callout`) e interceptaba el click → la generación nunca arrancaba. → se cierra en `navigate()`.
+3. **El editor de prompt ignoraba el primer `keyboard.type`** si la página recién cargó → el POST de generación salía con `prompt=` vacío y Envato fallaba EN SILENCIO (se veía sobre todo en video). → `_type_prompt` escribe y VERIFICA con reintento.
+4. **Un navegador/contexto de larga vida** hacía que Envato rechazara en silencio las generaciones de video. → se lanza un Chromium fresco por job.
+5. **El SessionKeeper guardaba `storage_state` concurrentemente** sobre el contexto del job en curso (rompía generaciones de >60s). → se eliminó ese save periódico (cada job persiste al cerrar su contexto).
+
+Ver `docs/TROUBLESHOOTING.md` para el detalle de cada uno.
 
 ## Roadmap
 
-### Inmediato (al volver Envato o resolver detección)
-
-1. Validar imageGen end-to-end con un job que termine `completed` y devuelva un asset descargable.
-2. Confirmar que el `result.asset_url` abre la imagen real en el navegador.
-3. Confirmar que el SessionKeeper guarda `storage_state` actualizado.
-
 ### Próximos generadores
 
-Implementarlos uno por uno, copiando el patrón de `imageGen` y solo cambiando URL + selectores específicos:
+- `mockupGen` ── `https://labs.envato.com/apps/mockup-gen/` (subdominio aparte, mapear desde cero).
+- `voiceGen` ── no se implementa (se usa ElevenLabs).
 
-- `videoGen` ── `https://app.envato.com/video-gen`
-- `musicGen` ── `https://app.envato.com/music-gen`
-- `voiceGen` ── `https://app.envato.com/voice-gen`
-- `soundGen` ── `https://app.envato.com/sound-gen`
-- `graphicsGen` ── `https://app.envato.com/graphics-gen`
-- `mockupGen` ── `https://labs.envato.com/apps/mockup-gen/` (subdominio aparte, hay que mapear desde cero)
+### Mejoras pendientes
 
-Para cada uno:
-
-1. Crear `app/adapters/{nombre}.py` heredando de `GeneratorAdapter`.
-2. Mapear selectores (probar primero los de imageGen, ajustar si difieren).
-3. Registrar en `app/adapters/__init__.py`.
-4. Validar con un job real.
-5. Documentar selectores en `docs/SELECTORS.md`.
+- graphics: bajar PNG con alpha real (hoy opaco) o exponer el SVG transparente.
+- music: soportar `genres`, `themes`, `include_lyrics` (pickers multi-select).
+- Devolver/exponer las N variaciones (hoy se baja solo la primera).
 
 ### Mejoras de robustez
 
