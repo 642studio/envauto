@@ -145,8 +145,16 @@ class ImageGenAdapter(GeneratorAdapter):
                     variations, sorted(self.VARIATIONS_VALUES),
                 )
 
+        # Hook para opciones extra de subclases (ej. graphicsGen: fondo transparente).
+        await self._extra_options(page, payload)
+
         # Disparar. .first como red de seguridad si :visible matchea más de uno.
         await page.locator(self.SUBMIT_BUTTON).first.click()
+
+    async def _extra_options(self, page: Page, payload: dict[str, Any]) -> None:
+        """Opciones específicas de subclases, aplicadas justo antes de Generate.
+        Por defecto no hace nada (imageGen no tiene extras)."""
+        return None
 
     async def _type_prompt(self, page: Page, prompt_box, prompt: str) -> None:
         """Escribe el prompt y verifica que el editor lo capturó; reintenta si quedó
