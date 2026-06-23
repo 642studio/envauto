@@ -1,0 +1,22 @@
+# Compose de un solo uso para el login interactivo por VNC dentro del VPS.
+# Uso (en el VPS, dentro de /opt/envautomatico):
+#   docker compose -f docker-compose.login.yml run --rm --service-ports login
+# Después de capturar la sesión, reiniciá el servicio principal:
+#   docker compose restart
+services:
+  login:
+    build:
+      context: .
+      dockerfile: Dockerfile.login
+    container_name: envautomatico-login
+    env_file:
+      - .env
+    volumes:
+      - ./auth:/app/auth      # acá queda el storage_state.json capturado
+      - ./scripts:/app/scripts
+      - ./app:/app/app
+    ports:
+      - "127.0.0.1:5900:5900" # VNC solo accesible vía túnel SSH (no expuesto a la red)
+    shm_size: 1gb
+    stdin_open: true
+    tty: true
